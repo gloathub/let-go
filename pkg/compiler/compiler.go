@@ -951,8 +951,13 @@ func loopCompiler(c *Context, form vm.Value) error {
 	if bindings == nil {
 		return NewCompileError("loop requires bindings")
 	}
-	binds, ok := bindings.First().(vm.ArrayVector)
-	if !ok {
+	var binds []vm.Value
+	switch bv := bindings.First().(type) {
+	case vm.ArrayVector:
+		binds = []vm.Value(bv)
+	case vm.PersistentVector:
+		binds = bv.Unbox().([]vm.Value)
+	default:
 		return NewCompileError("loop bindings should be a vector")
 	}
 	body := bindings.Next()
@@ -1010,8 +1015,13 @@ func letCompiler(c *Context, form vm.Value) error {
 	if bindings == nil {
 		return NewCompileError("let requires bindings")
 	}
-	binds, ok := bindings.First().(vm.ArrayVector)
-	if !ok {
+	var binds []vm.Value
+	switch bv := bindings.First().(type) {
+	case vm.ArrayVector:
+		binds = []vm.Value(bv)
+	case vm.PersistentVector:
+		binds = bv.Unbox().([]vm.Value)
+	default:
 		return NewCompileError(fmt.Sprintf("let bindings should be a vector, got %T: %v", bindings.First(), bindings.First()))
 	}
 	body := bindings.Next()
