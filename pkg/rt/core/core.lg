@@ -162,12 +162,11 @@
 (defn inc [x] (+ x 1))
 (defn dec [x] (- x 1))
 
-;; Auto-promoting variants (no overflow in let-go, so just aliases)
-(def inc' inc)
-(def dec' dec)
-(defn +' [& args] (apply + args))
-(defn -' [& args] (apply - args))
-(defn *' [& args] (apply * args))
+;; Auto-promoting variants: +' -' *' are native fns registered in
+;; pkg/rt/lang.go that promote to BigInt on int64 overflow. inc'/dec' compose
+;; on top of those, mirroring Clojure's `(defn inc' [x] (+' x 1))` shape.
+(defn inc' [x] (+' x 1))
+(defn dec' [x] (-' x 1))
 
 (defn num [x]
   (if (number? x) x

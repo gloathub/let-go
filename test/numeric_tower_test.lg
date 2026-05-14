@@ -87,3 +87,93 @@
     (is (> 3 2 1))
     (is (> 5 4 3 2 1))
     (is (not (> 3 1 2)))))
+
+(deftest apostrophe-overflow-promotion
+  (testing "+' promotes at int64 boundary"
+    (is (= 9223372036854775808N (+' 9223372036854775807 1)))
+    (is (= -9223372036854775809N (+' -9223372036854775808 -1)))
+    (is (bigint? (+' 9223372036854775807 1)))
+    (is (bigint? (+' -9223372036854775808 -1))))
+
+  (testing "-' promotes at int64 boundary"
+    (is (= -9223372036854775809N (-' -9223372036854775808 1)))
+    (is (= 9223372036854775808N (-' 0 -9223372036854775808)))
+    (is (bigint? (-' -9223372036854775808 1))))
+
+  (testing "*' promotes at int64 boundary"
+    (is (= 18446744073709551614N (*' 9223372036854775807 2)))
+    (is (= 9223372036854775808N (*' -9223372036854775808 -1)))
+    (is (bigint? (*' 9223372036854775807 2))))
+
+  (testing "apostrophe ops stay Int when no overflow"
+    (is (= 3 (+' 1 2)))
+    (is (= -1 (-' 1 2)))
+    (is (= 6 (*' 2 3)))
+    (is (int? (+' 1 2)))
+    (is (int? (*' 2 3))))
+
+  (testing "BigInt identity preserved through unary -'"
+    (is (= -1N (-' 1N)))
+    (is (= 1N (-' -1N)))
+    (is (bigint? (-' 1N)))
+    (is (bigint? (-' -1N))))
+
+  (testing "BigInt identity preserved through binary ops with BigInt arg"
+    (is (bigint? (+' 1 1N)))
+    (is (bigint? (-' 1N 1)))
+    (is (bigint? (*' 1N 1))))
+
+  (testing "variadic 0-arity matches Clojure"
+    (is (= 0 (+')))
+    (is (= 1 (*'))))
+
+  (testing "variadic chain across overflow boundary"
+    ;; First mul stays in int64, second overflows
+    (is (= 18446744073709551614N (*' 9223372036854775807 1 2)))
+    (is (bigint? (*' 9223372036854775807 1 2)))
+    ;; BigInt threaded through middle
+    (is (= 6N (+' 1 2N 3)))
+    (is (bigint? (+' 1 2N 3))))
+
+  (testing "inc'/dec' compose through +'/-'"
+    (is (= 9223372036854775808N (inc' 9223372036854775807)))
+    (is (= -9223372036854775809N (dec' -9223372036854775808)))
+    (is (bigint? (inc' 9223372036854775807)))
+    (is (bigint? (dec' -9223372036854775808))))
+
+  (testing "unary -' on Long/MIN_VALUE promotes (eval-level regression net)"
+    ;; Go-level TestNumNegP_MinInt covers this, but a future mis-wire of
+    ;; NumNegP via lang.go would slip past every other .lg test.
+    (is (bigint? (-' -9223372036854775808)))
+    (is (= 9223372036854775808N (-' -9223372036854775808))))
+
+  (testing "-' stays Int when result still fits (no over-eager promotion)"
+    ;; Mirrors Clojure JVM test_clojure/numbers.clj's
+    ;; test-arbitrary-precision-subtract — asserts -' doesn't over-promote.
+    (is (int? (-' 0 -9223372036854775807)))
+    (is (= 9223372036854775807 (-' 0 -9223372036854775807))))
+
+  (testing "+' variadic mid-chain overflow"
+    ;; First reduce stays Int (MaxLong + 1 would overflow → BigInt, second
+    ;; reduce adds 1 to BigInt → BigInt). Asserts the reducer correctly
+    ;; threads the BigInt through subsequent steps.
+    (is (= 9223372036854775809N (+' 9223372036854775807 1 1)))
+    (is (bigint? (+' 9223372036854775807 1 1))))
+
+  (testing "invalid binary inputs error"
+    (is (try (+' 1 nil) false (catch _ true)))
+    (is (try (-' 1 nil) false (catch _ true)))
+    (is (try (*' nil 1) false (catch _ true))))
+
+  (testing "unary +' and *' pass through non-numbers (matches +/*)"
+    ;; Documents existing let-go semantics: `(+ x)` and `(* x)` return x
+    ;; unchanged for any x. The apostrophe variants match. Clojure JVM
+    ;; would coerce/validate here; let-go does not. Out of scope for
+    ;; TASK-7 since the same is true of `+`/`*`.
+    (is (= nil (+' nil)))
+    (is (= nil (*' nil)))
+    (is (= "x" (+' "x")))
+    (is (= "x" (*' "x")))
+    ;; Unary -' DOES go through NumNegP and will error on non-numbers.
+    (is (try (-' nil) false (catch _ true)))
+    (is (try (-' "x") false (catch _ true)))))

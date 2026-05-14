@@ -42,9 +42,7 @@ var knownFailing = map[string]bool{
 	"disj_bang":      true, // disj! shim falls through to disj
 	"dissoc":         true, // dissoc on records has quirky behavior
 	"empty":          true, // empty on deftype/non-coll edge cases
-	"plus_squote":    true, // +' BigInt promotion at Long boundary
 	"realized_qmark": true, // realized? semantics mismatch
-	"star_squote":    true, // *' BigInt promotion at Long boundary
 	"underive":       true, // hierarchy stub returns empty
 	"with_precision": true, // with-precision is a no-op; results don't round
 	"case":           true, // case macro complex matching
