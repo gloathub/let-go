@@ -50,7 +50,9 @@
   (testing "juxtaposition"
     (is (= [1 2] ((juxt first second) [1 2 3])))
     (is (= [3 1] ((juxt count first) [1 2 3])))
-    (is (= [2 0] ((juxt inc dec) 1)))))
+    (is (= [2 0] ((juxt inc dec) 1)))
+    (is (= ["12345678910" 1 10]
+           ((juxt str min max) 1 2 3 4 5 6 7 8 9 10)))))
 
 (deftest identity-constantly
   (testing "identity"

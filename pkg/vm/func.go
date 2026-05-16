@@ -239,6 +239,8 @@ func makeMultiArity(fns []Value) (*MultiArityFn, error) {
 		}
 		if rest, ok := f.(*Func); ok && rest.isVariadric {
 			ma.rest = rest
+		} else if rest, ok := f.(*Closure); ok && rest.fn.isVariadric {
+			ma.rest = rest
 		} else {
 			ma.fns[a] = f
 		}
