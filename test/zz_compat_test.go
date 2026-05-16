@@ -43,7 +43,6 @@ var knownFailing = map[string]bool{
 	"star_squote":    true, // *' BigInt promotion at Long boundary
 	"with_precision": true, // with-precision is a no-op; results don't round
 	"case":           true, // case macro complex matching
-	"compare":        true, // compare cross-type issues
 	"conj":           true, // conj arity/nil edge cases
 	"conj_bang":      true, // transient conj edge cases
 	"dec":            true, // dec overflow/type coercion

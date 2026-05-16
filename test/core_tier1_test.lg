@@ -128,7 +128,8 @@
     (is (= 1 (compare 1 nil))))
   (testing "compare keywords"
     (is (= 0 (compare :a :a)))
-    (is (= -1 (compare :a :b))))
+    (is (= -1 (compare :a :b)))
+    (is (= -1 (compare :cat :animal/cat))))
   (testing "compare mixed numeric"
     (is (= 0 (compare 1 1.0)))
     (is (= -1 (compare 1 1.5)))))
