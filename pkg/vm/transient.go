@@ -81,14 +81,47 @@ func (t *TransientMap) Conj(value Value) (*TransientMap, error) {
 	if err := t.ensureEditable(); err != nil {
 		return nil, err
 	}
+	if value == NIL {
+		return t, nil
+	}
+	switch m := value.(type) {
+	case *PersistentMap:
+		for _, e := range m.entries() {
+			k, v, ok := MapEntryKV(e)
+			if !ok {
+				continue
+			}
+			var err error
+			t, err = t.Assoc(k, v)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return t, nil
+	case *SortedMap:
+		for _, e := range m.entries() {
+			var err error
+			t, err = t.Assoc(e.Key, e.Value)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return t, nil
+	case Map:
+		for k, v := range m {
+			var err error
+			t, err = t.Assoc(k, v)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return t, nil
+	}
 	if k, v, ok := MapEntryKV(value); ok {
 		return t.Assoc(k, v)
 	}
-	// Handle PersistentVector or any 2-element vector/seq
-	if l, ok := value.(Lookup); ok {
-		if c, ok := value.(Counted); ok && c.RawCount() == 2 {
-			return t.Assoc(l.ValueAt(Int(0)), l.ValueAt(Int(1)))
-		}
+	if v, ok := value.(PersistentVector); ok && v.RawCount() == 2 {
+		return t.Assoc(v.ValueAt(Int(0)), v.ValueAt(Int(1)))
 	}
 	return nil, fmt.Errorf("conj! on transient map expects [key val] pair")
 }

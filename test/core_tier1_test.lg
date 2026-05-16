@@ -166,7 +166,8 @@
 (deftest nthnext-test
   (testing "nthnext drops n elements, returns nil at end"
     (is (= '(3 4 5) (nthnext [1 2 3 4 5] 2)))
-    (is (nil? (nthnext [1 2] 5)))))
+    (is (nil? (nthnext [1 2] 5)))
+    (is (nil? (nthnext nil nil)))))
 
 ;; --- cycle + take ---
 

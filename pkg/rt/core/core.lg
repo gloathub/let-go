@@ -1843,10 +1843,12 @@
 
 (defn nthnext
   [coll n]
-  (loop [s coll i n]
-    (if (and (pos? i) (seq s))
-      (recur (next s) (dec i))
-      (seq s))))
+  (if (nil? coll)
+    nil
+    (loop [s coll i n]
+      (if (and (pos? i) (seq s))
+        (recur (next s) (dec i))
+        (seq s)))))
 
 ;; --- Tier 2 functions ---
 

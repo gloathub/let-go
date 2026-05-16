@@ -20,6 +20,16 @@
       (is (= 1 (:a m)))
       (is (= 2 (:b m))))))
 
+(deftest transient-map-conj-map-values
+  (testing "conj! on transient map with nil and map values"
+    (let [t (transient {})
+          t (conj! t nil)
+          t (conj! t {})
+          t (conj! t {:a 1})
+          t (conj! t {:a 2 :b 1})
+          m (persistent! t)]
+      (is (= {:a 2 :b 1} m)))))
+
 (deftest transient-vector-basic
   (testing "transient vector conj! and persistent!"
     (let [t (transient [])

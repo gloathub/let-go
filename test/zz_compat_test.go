@@ -40,7 +40,6 @@ var knownFailing = map[string]bool{
 	"with_precision": true, // with-precision is a no-op; results don't round
 	"case":           true, // case macro complex matching
 	"conj":           true, // conj arity/nil edge cases
-	"conj_bang":      true, // transient conj edge cases
 	"dec":            true, // dec overflow/type coercion
 	"double_qmark":   true, // no float32/float64 distinction
 	"empty_qmark":    true, // empty? on list containing nil
@@ -54,7 +53,6 @@ var knownFailing = map[string]bool{
 	"minus":          true, // overflow not detected
 	"nnext":          true, // map ordering
 	"not_empty":      true, // not-empty on list containing nil
-	"nthnext":        true, // nthnext on various types
 	"num":            true, // num edge cases
 	"peek":           true, // peek on cons
 	"plus":           true, // overflow not detected
