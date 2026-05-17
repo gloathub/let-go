@@ -6216,8 +6216,8 @@ func installClojureCompatAliases(ns *vm.Namespace) {
 	ns.Def("->Integer", ns.Lookup("int").(*vm.Var).Deref())
 
 	longNS := DefNSBare("Long")
-	longNS.Def("MAX_VALUE", vm.Int(9223372036854775807))
-	longNS.Def("MIN_VALUE", vm.Int(-9223372036854775808))
+	longNS.Def("MAX_VALUE", longCompatValue(9223372036854775807))
+	longNS.Def("MIN_VALUE", longCompatValue(-9223372036854775808))
 	longNS.Def("TYPE", vm.IntType)
 
 	doubleNS := DefNSBare("Double")
@@ -6242,6 +6242,13 @@ func installClojureCompatAliases(ns *vm.Namespace) {
 		panic(err)
 	}
 	mapEntryNS.Def("create", create)
+}
+
+func longCompatValue(v int64) vm.Value {
+	if strconv.IntSize == 64 {
+		return vm.Int(v)
+	}
+	return vm.NewBigIntFromInt64(v)
 }
 
 func strValue(v vm.Value) string {
