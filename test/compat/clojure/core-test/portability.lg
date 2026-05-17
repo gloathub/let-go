@@ -71,7 +71,11 @@
 (def bound-fn* clojure.core/bound-fn*)
 (defmacro bound-fn [& body]
   (list 'clojure.core/bound-fn* (cons 'fn body)))
-(defmacro with-precision [_ & body] `(do ~@body))
+(defmacro with-precision [precision & body]
+  (let [rounding? (= :rounding (first body))
+        rounding (if rounding? (second body) :half-up)
+        forms (if rounding? (next (next body)) body)]
+    `(round-bigdec ~precision ~rounding (do ~@forms))))
 ;; dosync — we don't have STM. Single-threaded evaluation of the body
 ;; behaves atomically with respect to other let-go code.
 (defmacro dosync [& body] `(do ~@body))
@@ -104,6 +108,16 @@
   (let [method-names (distinct (map first sigs))
         proto-sigs (map (fn [m] (list m '[this x])) method-names)]
     (cons 'defprotocol (cons name proto-sigs))))
+
+(in-ns 'core)
+(deftype LetGoNumBox [value])
+(defn num [x]
+  (cond
+    (nil? x) nil
+    (not (number? x)) (throw (str "Expected a number, got " (type x)))
+    (or (bigint? x) (decimal? x)) x
+    :else (->LetGoNumBox x)))
+(in-ns 'clojure.core-test.portability)
 
 (create-ns 'Long)
 (intern 'Long 'MAX_VALUE 9223372036854775807)

@@ -514,7 +514,7 @@ func valueEquals(a, b vm.Value) bool {
 		}
 		as := vm.Seq(av)
 		for as != nil && bs != nil {
-			if !valueEquals(as.First(), bs.First()) {
+			if !listElementEquals(as.First(), bs.First()) {
 				return false
 			}
 			as, bs = as.Next(), bs.Next()
@@ -640,6 +640,13 @@ func isNaNValue(v vm.Value) bool {
 		return math.IsNaN(float64(f))
 	}
 	return false
+}
+
+func listElementEquals(a, b vm.Value) bool {
+	if isNaNValue(a) && isNaNValue(b) {
+		return true
+	}
+	return valueEquals(a, b)
 }
 
 func nilListEquivalent(a, b vm.Value) bool {
@@ -800,6 +807,22 @@ func fnComparator(comp vm.Fn) vm.Comparator {
 }
 
 func invokeMethodFallback(rec vm.Value, name vm.Symbol, args []vm.Value, originalErr error) (vm.Value, error) {
+	if isCompatChecker(rec) && len(args) == 1 {
+		switch name {
+		case "isLong":
+			if _, boxed := args[0].(*vm.DTypeInstance); boxed {
+				return vm.FALSE, nil
+			}
+			_, ok := args[0].(vm.Int)
+			return vm.Boolean(ok), nil
+		case "isDouble":
+			if _, boxed := args[0].(*vm.DTypeInstance); boxed {
+				return vm.FALSE, nil
+			}
+			_, ok := args[0].(vm.Float)
+			return vm.Boolean(ok), nil
+		}
+	}
 	if name == "reduce" && len(args) == 1 {
 		if v := CoreNS.Lookup(vm.Symbol("reduce")); v != vm.NIL {
 			if methodVar, ok := v.(*vm.Var); ok {
@@ -833,6 +856,95 @@ func invokeMethodFallback(rec vm.Value, name vm.Symbol, args []vm.Value, origina
 		}
 	}
 	return vm.NIL, originalErr
+}
+
+func isCompatChecker(v vm.Value) bool {
+	inst, ok := v.(*vm.DTypeInstance)
+	if !ok {
+		return false
+	}
+	return strings.HasSuffix(inst.DType().Name(), "Checker")
+}
+
+func roundBigDecimalValue(v *vm.BigDecimal, precision int, modeName string) (vm.Value, error) {
+	if precision <= 0 {
+		return vm.NIL, fmt.Errorf("precision must be positive")
+	}
+	f, _ := v.Val().Float64()
+	if f == 0 {
+		return v, nil
+	}
+	sign := 1
+	if f < 0 {
+		sign = -1
+		f = -f
+	}
+	exp := int(math.Floor(math.Log10(f)))
+	scaleExp := precision - 1 - exp
+	rat, ok := new(big.Rat).SetString(v.Val().Text('f', -1))
+	if !ok {
+		return vm.NIL, fmt.Errorf("cannot round BigDecimal %s", v)
+	}
+	if sign < 0 {
+		rat.Abs(rat)
+	}
+	scaled := new(big.Rat).Mul(rat, pow10Rat(scaleExp))
+	rounded, err := roundRatToInt(scaled, sign, modeName)
+	if err != nil {
+		return vm.NIL, err
+	}
+	result := new(big.Rat).SetInt(rounded)
+	result.Quo(result, pow10Rat(scaleExp))
+	if sign < 0 {
+		result.Neg(result)
+	}
+	return vm.NewBigDecimal(new(big.Float).SetPrec(vm.BigDecimalPrecConst).SetRat(result)), nil
+}
+
+func pow10Rat(exp int) *big.Rat {
+	if exp >= 0 {
+		return new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(exp)), nil))
+	}
+	return new(big.Rat).Inv(new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-exp)), nil)))
+}
+
+func roundRatToInt(r *big.Rat, sign int, modeName string) (*big.Int, error) {
+	q := new(big.Int).Quo(r.Num(), r.Denom())
+	rem := new(big.Int).Rem(r.Num(), r.Denom())
+	if rem.Sign() == 0 {
+		return q, nil
+	}
+	ceil := new(big.Int).Add(q, big.NewInt(1))
+	switch modeName {
+	case "up":
+		return ceil, nil
+	case "down":
+		return q, nil
+	case "ceiling":
+		if sign > 0 {
+			return ceil, nil
+		}
+		return q, nil
+	case "floor":
+		if sign < 0 {
+			return ceil, nil
+		}
+		return q, nil
+	case "unnecessary":
+		return nil, fmt.Errorf("rounding necessary")
+	case "half-up", "half-down", "half-even":
+		twiceRem := new(big.Int).Mul(rem, big.NewInt(2))
+		cmp := twiceRem.Cmp(r.Denom())
+		if cmp > 0 || (cmp == 0 && modeName == "half-up") {
+			return ceil, nil
+		}
+		if cmp == 0 && modeName == "half-even" && q.Bit(0) == 1 {
+			return ceil, nil
+		}
+		return q, nil
+	default:
+		return nil, fmt.Errorf("unknown rounding mode %s", modeName)
+	}
 }
 
 // nolint
@@ -925,6 +1037,9 @@ func installLangNS() {
 
 	notEq, err := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) < 2 {
+			return vm.FALSE, nil
+		}
+		if len(vs) == 2 && isNaNValue(vs[0]) && isNaNValue(vs[1]) {
 			return vm.FALSE, nil
 		}
 		eq, err := equals.(vm.Fn).Invoke(vs)
@@ -4903,7 +5018,17 @@ func installLangNS() {
 		case vm.Int:
 			return vm.NewBigIntFromInt64(int64(v)), nil
 		case vm.Float:
-			return vm.NewBigIntFromInt64(int64(v)), nil
+			f := float64(v)
+			if math.IsNaN(f) || math.IsInf(f, 0) {
+				return vm.NIL, fmt.Errorf("cannot coerce %s to bigint", vs[0])
+			}
+			decimal := strconv.FormatFloat(f, 'g', -1, 64)
+			i, _, err := new(big.Float).SetPrec(4096).SetMode(big.ToZero).Parse(decimal, 10)
+			if err != nil || i == nil {
+				return vm.NIL, fmt.Errorf("cannot coerce %s to bigint", vs[0])
+			}
+			bi, _ := i.Int(nil)
+			return vm.NewBigInt(bi), nil
 		case *vm.BigInt:
 			return v, nil
 		case vm.String:
@@ -5095,6 +5220,34 @@ func installLangNS() {
 	})
 	ns.Def("bigdec", bigdecf)
 
+	roundBigdec, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 3 {
+			return vm.NIL, fmt.Errorf("round-bigdec expects precision, rounding mode, and value")
+		}
+		precision, ok := vm.ToInt(vs[0])
+		if !ok {
+			return vm.NIL, fmt.Errorf("round-bigdec expected integer precision")
+		}
+		var modeName string
+		switch m := vs[1].(type) {
+		case vm.Keyword:
+			modeName = string(m)
+		case vm.Symbol:
+			modeName = string(m)
+		case vm.String:
+			modeName = string(m)
+		default:
+			return vm.NIL, fmt.Errorf("round-bigdec expected rounding mode")
+		}
+		modeName = strings.TrimPrefix(strings.ToLower(modeName), ":")
+		bd, ok := vs[2].(*vm.BigDecimal)
+		if !ok {
+			return vs[2], nil
+		}
+		return roundBigDecimalValue(bd, precision, modeName)
+	})
+	ns.Def("round-bigdec", roundBigdec)
+
 	// rationalize — convert to Ratio
 	rationalizef, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
@@ -5104,9 +5257,9 @@ func installLangNS() {
 		case *vm.Ratio:
 			return v, nil
 		case vm.Int:
-			return vm.NewRatioFromInts(int64(v), 1), nil
+			return vm.MaybeSimplifyRatio(big.NewRat(int64(v), 1)), nil
 		case *vm.BigInt:
-			return vm.NewRatio(new(big.Rat).SetInt(v.Val())), nil
+			return vm.MaybeSimplifyRatio(new(big.Rat).SetInt(v.Val())), nil
 		case vm.Float:
 			f := float64(v)
 			if math.IsInf(f, 0) || math.IsNaN(f) {
@@ -5916,13 +6069,13 @@ func installLangNS() {
 	})
 	ns.Def("parse-uuid", parseUUID)
 
-	// == — numeric equality (same as = for our purposes)
+	// == — numeric equality across numeric categories.
 	numericEq, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) < 2 {
 			return vm.TRUE, nil
 		}
 		for i := 1; i < len(vs); i++ {
-			if !valueEquals(vs[0], vs[i]) {
+			if !vm.NumEquivalent(vs[0], vs[i]) {
 				return vm.FALSE, nil
 			}
 		}

@@ -27,14 +27,7 @@ const memLimitBytes = 512 * 1024 * 1024
 
 // knownFailing lists test names (filename stems) that are known to fail.
 // Tests that pass but appear here will cause an error so the list stays current.
-var knownFailing = map[string]bool{
-	"bigint":         true, // BigInt promotion at Long range boundary
-	"with_precision": true, // with-precision is a no-op; results don't round
-	"case":           true, // case macro complex matching
-	"eq":             true, // JVM numeric equality and NaN collection edge cases
-	"not_eq":         true, // JVM numeric equality and NaN collection edge cases
-	"num":            true, // JVM primitive overload checks
-}
+var knownFailing = map[string]bool{}
 
 // suiteCounters tracks aggregate assertion counts across the entire suite.
 type suiteCounters struct {

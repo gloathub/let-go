@@ -219,6 +219,18 @@ func NumDiv(a, b Value) (Value, error) {
 			return Float(floatDiv(af, bf)), nil
 		}
 	}
+	if _, ok := a.(*BigDecimal); ok {
+		if bf, ok := b.(Float); ok {
+			af, _ := ToFloat(a)
+			return Float(floatDiv(af, float64(bf))), nil
+		}
+	}
+	if _, ok := b.(*BigDecimal); ok {
+		if af, ok := a.(Float); ok {
+			bf, _ := ToFloat(b)
+			return Float(floatDiv(float64(af), bf)), nil
+		}
+	}
 	switch av := a.(type) {
 	case Int:
 		switch bv := b.(type) {
@@ -1017,8 +1029,53 @@ func NumLe(a, b Value) (bool, error) {
 	return false, fmt.Errorf("cannot compare %s and %s", a.Type().Name(), b.Type().Name())
 }
 
-// NumEq tests numeric equality (cross-type: 1 == 1.0 is true).
+// NumEq tests Clojure = numeric equality. Exact integers compare across
+// fixed/big integer representations, floating values compare by value, and
+// BigDecimal only compares with BigDecimal.
 func NumEq(a, b Value) bool {
+	switch av := a.(type) {
+	case Int:
+		switch bv := b.(type) {
+		case Int:
+			return int(av) == int(bv)
+		case *BigInt:
+			return big.NewInt(int64(av)).Cmp(bv.val) == 0
+		}
+	case Float:
+		switch bv := b.(type) {
+		case Float:
+			return float64(av) == float64(bv)
+		case Float32:
+			return float64(av) == float64(bv)
+		}
+	case Float32:
+		switch bv := b.(type) {
+		case Float:
+			return float64(av) == float64(bv)
+		case Float32:
+			return float64(av) == float64(bv)
+		}
+	case *BigInt:
+		switch bv := b.(type) {
+		case Int:
+			return av.val.Cmp(big.NewInt(int64(bv))) == 0
+		case *BigInt:
+			return av.val.Cmp(bv.val) == 0
+		}
+	case *Ratio:
+		if bv, ok := b.(*Ratio); ok {
+			return av.val.Cmp(bv.val) == 0
+		}
+	case *BigDecimal:
+		if bv, ok := b.(*BigDecimal); ok {
+			return av.val.Cmp(bv.val) == 0
+		}
+	}
+	return false
+}
+
+// NumEquivalent tests broad numeric equivalence for == and numeric predicates.
+func NumEquivalent(a, b Value) bool {
 	a = normalizeFloat32(a)
 	b = normalizeFloat32(b)
 	switch av := a.(type) {

@@ -173,7 +173,7 @@ func valueEquiv(a, b Value) bool {
 			return true
 		}
 	}
-	// Numeric cross-type: Int(1) == Float(1.0)
+	// Numeric equality follows Clojure = semantics, not ==.
 	if IsNumber(a) && IsNumber(b) {
 		return NumEq(a, b)
 	}

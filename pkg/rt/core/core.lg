@@ -109,8 +109,12 @@
              (if (>= i pair-count)
                acc
                (let [test-val (nth fv i)
-                     result (nth fv (inc i))]
-                 (if (and (list? test-val) (not (empty? test-val)))
+                     result (nth fv (inc i))
+                     set-literal? (and (list? test-val) (= 'hash-set (first test-val)))
+                     quoted-test (if (or (set? test-val) set-literal?)
+                                   test-val
+                                   (list 'quote test-val))]
+                 (if (and (list? test-val) (not set-literal?) (not (empty? test-val)))
                    ;; List of alternatives: (a b c)
                    (recur (+ i 2)
                           (conj acc
@@ -119,7 +123,7 @@
                    ;; Single value — quote it
                    (recur (+ i 2)
                           (conj acc
-                                (list '= g (list 'quote test-val))
+                                (list '= g quoted-test)
                                 result))))))
          :else ~default-val))))
 
@@ -142,7 +146,7 @@
 
 (defn zero? [x]
   (if (number? x)
-    (= 0 x)
+    (== 0 x)
     (throw (str "zero? requires a number, got " x))))
 (defn pos? [x] (gt x 0))
 (defn neg? [x] (lt x 0))

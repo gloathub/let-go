@@ -51,8 +51,10 @@
   (testing "comparing int and float"
     (is (> 3.14 3))
     (is (< 3 3.14))
-    (is (= 1 1.0))
-    (is (= 1.0 1))
+    (is (== 1 1.0))
+    (is (== 1.0 1))
+    (is (not (= 1 1.0)))
+    (is (not (= 1.0 1)))
     (is (not (= 1 1.5)))))
 
 (deftest coercion-functions
