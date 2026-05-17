@@ -30,7 +30,6 @@ const memLimitBytes = 512 * 1024 * 1024
 var knownFailing = map[string]bool{
 	"abs":            true, // :default reader branch expects min-int negation to succeed
 	"bigint":         true, // BigInt promotion at Long range boundary
-	"dissoc":         true, // dissoc on records has quirky behavior
 	"plus_squote":    true, // +' BigInt promotion at Long boundary
 	"realized_qmark": true, // realized? semantics mismatch
 	"star_squote":    true, // *' BigInt promotion at Long boundary

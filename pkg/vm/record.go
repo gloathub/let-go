@@ -227,13 +227,20 @@ func (r *Record) Assoc(key Value, val Value) Associative {
 }
 
 func (r *Record) Dissoc(key Value) Associative {
-	// Can't remove a fixed field — set to nil
 	if kw, ok := key.(Keyword); ok {
-		if idx, ok := r.rtype.fieldIdx[kw]; ok {
-			newFields := make([]Value, len(r.fields))
-			copy(newFields, r.fields)
-			newFields[idx] = nil
-			return &Record{rtype: r.rtype, fields: newFields, extra: r.extra}
+		if _, ok := r.rtype.fieldIdx[kw]; ok {
+			m := r.extra
+			for i, field := range r.rtype.fields {
+				if field == kw {
+					continue
+				}
+				v := r.fields[i]
+				if v == nil {
+					v = NIL
+				}
+				m = m.Assoc(field, v).(*PersistentMap)
+			}
+			return m
 		}
 	}
 	return &Record{rtype: r.rtype, fields: r.fields, extra: r.extra.Dissoc(key).(*PersistentMap)}

@@ -1255,6 +1255,9 @@ func installLangNS() {
 		ret := coll
 		for i := 1; i < len(vs); i++ {
 			ret = ret.Dissoc(vs[i])
+			if vs[0] != vm.NIL && ret == vm.NIL {
+				return vm.NIL, fmt.Errorf("dissoc failed for key %s", vs[i].String())
+			}
 		}
 		return ret, nil
 	})
