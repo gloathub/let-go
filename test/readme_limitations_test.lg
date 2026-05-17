@@ -39,16 +39,20 @@
     (is (= {:x 1} (read-string "#test/unknown {:x 1}")))
     (is (not (tagged-literal? (read-string "#test/unknown {:x 1}"))))))
 
-(deftest java-style-deftype-methods-not-implemented
+(defprotocol ReadmeLimitationProtocol
+  (readme-value [this]))
+
+(deftest java-style-deftype-and-reify-methods-not-implemented
   (testing "field-backed deftype works"
     (is (= 42 (load-string "(do (deftype ReadmeLimitationBox [x]) (.x (->ReadmeLimitationBox 42)))"))))
+  (testing "protocol reify works"
+    (let [r (reify ReadmeLimitationProtocol
+              (readme-value [this] 42))]
+      (is (satisfies? ReadmeLimitationProtocol r))
+      (is (= 42 (readme-value r)))))
   (testing "Java-style host method bodies and host interfaces do not"
     (is (unsupported? "(deftype ReadmeLimitationToString [x] Object (toString [this] \"x\"))"))
-    (is (unsupported? "(deftype ReadmeLimitationRunnable [] java.lang.Runnable (run [this] nil))"))))
-
-(deftest reify-not-implemented
-  (testing "reify is not implemented"
-    (is (unsupported? "(reify)"))
+    (is (unsupported? "(deftype ReadmeLimitationRunnable [] java.lang.Runnable (run [this] nil))"))
     (is (unsupported? "(reify Object (toString [this] \"x\"))"))))
 
 (deftest spec-not-implemented

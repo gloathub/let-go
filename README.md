@@ -75,7 +75,7 @@ lens, with no known failures, compile skips, panic skips, or runtime skips.
 
 | Namespace            | Status                                                                                                                                                                                        |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `clojure.core`       | macros, destructuring, lazy seqs, transducers, protocols, records, `deftype`, multimethods, hierarchies, atoms, regex, metadata, BigInt, BigDecimal                                            |
+| `clojure.core`       | macros, destructuring, lazy seqs, transducers, protocols, records, `deftype`, `reify`, multimethods, hierarchies, atoms, regex, metadata, BigInt, BigDecimal                                   |
 | `clojure.string`     | full                                                                                                                                                                                          |
 | `clojure.set`        | full                                                                                                                                                                                          |
 | `clojure.walk`       | `prewalk`, `postwalk`, `keywordize-keys`, `stringify-keys`, `walk`                                                                                                                            |
@@ -119,8 +119,7 @@ for what's available.
 - **Agents** (use `go` blocks and channels)
 - **Chunked sequences**: lazy seqs are unchunked
 - **Custom tagged literal readers**: built-in `#uuid` and `#inst` work; unknown tags read as their payload, and `*data-readers*` / `*default-data-reader-fn*` are not implemented
-- **Java-style `deftype` method bodies / host interfaces**: field-backed `deftype` and protocol implementations work; JVM host methods do not
-- **`reify`** (protocols can only be extended to named types)
+- **Java-style `deftype` / `reify` method bodies and host interfaces**: protocol implementations work; JVM host methods do not
 - **Spec** (no `clojure.spec`)
 - **`subseq` / `rsubseq`**: sorted collections work (`sorted-map`, `sorted-set`, `rseq`); range queries don't
 

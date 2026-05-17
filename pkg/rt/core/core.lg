@@ -1695,6 +1695,44 @@
                        by-proto)]
       (cons 'do extends))))
 
+;; (reify
+;;   Protocol1
+;;   (method1 [this] body1)
+;;   (method2 [this arg] body2)
+;;   Protocol2
+;;   (method3 [this] body3))
+;; Creates an anonymous, fieldless type, extends it to the listed protocols,
+;; and returns one instance. Method bodies are plain closures, so they capture
+;; surrounding lexical locals naturally.
+(defmacro reify [& specs]
+  (let [type-sym (gensym "reify__")
+        parse (fn [specs]
+                (loop [s specs
+                       proto nil
+                       result []]
+                  (if (empty? s)
+                    result
+                    (let [item (first s)]
+                      (if (symbol? item)
+                        (recur (next s) item result)
+                        (let [mname   (first item)
+                              fn-tail (next item)
+                              entry   [proto mname (cons 'fn fn-tail)]]
+                          (recur (next s) proto (conj result entry))))))))]
+    (let [entries (parse specs)
+          by-proto (group-by first entries)
+          extends (map (fn [[proto-sym methods]]
+                         (let [impl-pairs (mapcat (fn [[_ mname fn-form]]
+                                                    [(keyword mname) fn-form])
+                                                  methods)]
+                           (list 'extend-type* proto-sym type-sym
+                                 (apply hash-map impl-pairs))))
+                       by-proto)]
+      (cons 'let
+            (cons [type-sym (list 'make-deftype (str type-sym))]
+                  (concat extends
+                          (list (list 'make-deftype-instance type-sym))))))))
+
 ;; (extend-protocol Protocol
 ;;   type-expr1
 ;;   (method [this] body1)
