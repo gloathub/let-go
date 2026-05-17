@@ -717,7 +717,7 @@ func readMap(r *LispReader, _ rune) (vm.Value, error) {
 	if len(ret)%2 != 0 {
 		return vm.NIL, NewReaderError(r, "map literal must contain even number of forms")
 	}
-	result := vm.NewMap(ret)
+	result := vm.NewArrayMap(ret)
 	vm.FormSource.Set(result, vm.SourceInfo{
 		File: r.inputName, Line: startLine, Column: startCol,
 	})

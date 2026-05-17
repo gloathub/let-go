@@ -45,10 +45,8 @@ var knownFailing = map[string]bool{
 	"float":          true, // BigDecimal edge cases
 	"inc":            true, // overflow untested assertion
 	"int":            true, // int overflow bounds
-	"mapcat":         true, // hash-map iteration order (single edge case)
 	"merge":          true, // merge with nil/meta
 	"minus":          true, // overflow not detected
-	"nnext":          true, // map ordering
 	"num":            true, // num edge cases
 	"plus":           true, // overflow not detected
 	"reduce":         true, // reduce interop edge cases

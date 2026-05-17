@@ -5,6 +5,8 @@
 
 package vm
 
+import "unicode/utf16"
+
 const (
 	fnvOffset32 = uint32(2166136261)
 	fnvPrime32  = uint32(16777619)
@@ -54,6 +56,64 @@ func hashString(s string) uint32 {
 	return h
 }
 
+func hashUnencodedChars(s string) uint32 {
+	ascii := true
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			ascii = false
+			break
+		}
+	}
+	if ascii {
+		return hashUTF16CodeUnits(uint16FromBytes(s))
+	}
+	return hashUTF16CodeUnits(uint16Slice(utf16.Encode([]rune(s))))
+}
+
+type uint16FromBytes string
+
+func (s uint16FromBytes) Len() int            { return len(s) }
+func (s uint16FromBytes) At(i int) uint32     { return uint32(s[i]) }
+func (s uint16FromBytes) LengthBytes() uint32 { return uint32(2 * len(s)) }
+
+type uint16Slice []uint16
+
+func (s uint16Slice) Len() int            { return len(s) }
+func (s uint16Slice) At(i int) uint32     { return uint32(s[i]) }
+func (s uint16Slice) LengthBytes() uint32 { return uint32(2 * len(s)) }
+
+type utf16CodeUnits interface {
+	Len() int
+	At(int) uint32
+	LengthBytes() uint32
+}
+
+func hashUTF16CodeUnits(s utf16CodeUnits) uint32 {
+	var h uint32
+	i := 1
+	for ; i < s.Len(); i += 2 {
+		k := s.At(i-1) | s.At(i)<<16
+		h = mixH1(h, mixK1(k))
+	}
+	if i == s.Len() {
+		h ^= mixK1(s.At(i - 1))
+	}
+	return mixFinishLen(h, s.LengthBytes())
+}
+
+func mixK1(k uint32) uint32 {
+	k *= 0xcc9e2d51
+	k = (k << 15) | (k >> 17)
+	k *= 0x1b873593
+	return k
+}
+
+func mixH1(h, k uint32) uint32 {
+	h ^= k
+	h = (h << 13) | (h >> 19)
+	return h*5 + 0xe6546b64
+}
+
 func hashUint64(v uint64) uint32 {
 	// Murmur3 finalizer
 	v ^= v >> 33
@@ -88,6 +148,11 @@ func hashUnordered(seq Seq) uint32 {
 
 // mixFinish is Murmur3's fmix32.
 func mixFinish(h uint32) uint32 {
+	return mixFinishLen(h, 0)
+}
+
+func mixFinishLen(h uint32, length uint32) uint32 {
+	h ^= length
 	h ^= h >> 16
 	h *= 0x85ebca6b
 	h ^= h >> 13

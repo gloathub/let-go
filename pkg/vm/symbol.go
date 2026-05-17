@@ -36,7 +36,7 @@ var SymbolType *theSymbolType = &theSymbolType{zero: "????BADSYMBOL????"}
 type Symbol string
 
 // Hash implements Hashable for fast map lookups.
-func (l Symbol) Hash() uint32 { return hashString(string(l)) ^ 0x517cc1b7 }
+func (l Symbol) Hash() uint32 { return hashUnencodedChars(string(l)) }
 
 // Type implements Value
 func (l Symbol) Type() ValueType { return SymbolType }

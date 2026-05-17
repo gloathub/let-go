@@ -1022,6 +1022,12 @@ func installLangNS() {
 		}
 		return vm.NewMap(vs), nil
 	})
+	arrayMap, err := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs)%2 != 0 {
+			return vm.NIL, fmt.Errorf("array-map requires an even number of arguments, got %d", len(vs))
+		}
+		return vm.NewArrayMap(vs), nil
+	})
 	hashSet, err := vm.NativeFnType.WrapNoErr(vm.NewSet)
 
 	sortedMap, err := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
@@ -4524,6 +4530,7 @@ func installLangNS() {
 	ns.Def("vector", vector)
 	ns.Def("vec", vec)
 	ns.Def("hash-map", hashMap)
+	ns.Def("array-map", arrayMap)
 	ns.Def("list", list)
 	ns.Def("range", rangef)
 	ns.Def("keyword", keyword)

@@ -509,6 +509,7 @@ type PersistentMap struct {
 	count    int
 	root     hmapNode
 	meta     Value
+	order    []Value
 	_hash    uint32
 	_hasHash bool
 }
@@ -542,6 +543,21 @@ func NewPersistentMap(kvs []Value) *PersistentMap {
 		return EmptyPersistentMap
 	}
 	m := EmptyPersistentMap
+	for i := 0; i < len(kvs); i += 2 {
+		m = m.Assoc(kvs[i], kvs[i+1]).(*PersistentMap)
+	}
+	return m
+}
+
+// NewArrayMap creates a PersistentMap that preserves insertion order for seq.
+func NewArrayMap(kvs []Value) *PersistentMap {
+	if len(kvs) == 0 {
+		return EmptyPersistentMap
+	}
+	if len(kvs)%2 != 0 {
+		return EmptyPersistentMap
+	}
+	m := &PersistentMap{order: make([]Value, 0, len(kvs)/2)}
 	for i := 0; i < len(kvs); i += 2 {
 		m = m.Assoc(kvs[i], kvs[i+1]).(*PersistentMap)
 	}
@@ -656,7 +672,14 @@ func (m *PersistentMap) Assoc(key Value, val Value) Associative {
 	if addedLeaf {
 		newCount++
 	}
-	return &PersistentMap{count: newCount, root: newRoot, meta: m.meta}
+	var newOrder []Value
+	if m.order != nil {
+		newOrder = append([]Value(nil), m.order...)
+		if addedLeaf {
+			newOrder = append(newOrder, key)
+		}
+	}
+	return &PersistentMap{count: newCount, root: newRoot, meta: m.meta, order: newOrder}
 }
 
 func (m *PersistentMap) Dissoc(key Value) Associative {
@@ -669,9 +692,21 @@ func (m *PersistentMap) Dissoc(key Value) Associative {
 		return m
 	}
 	if newRoot == nil {
+		if m.order != nil {
+			return &PersistentMap{count: 0, root: nil, meta: m.meta, order: []Value{}}
+		}
 		return &PersistentMap{count: 0, root: nil, meta: m.meta}
 	}
-	return &PersistentMap{count: m.count - 1, root: newRoot, meta: m.meta}
+	var newOrder []Value
+	if m.order != nil {
+		newOrder = make([]Value, 0, len(m.order)-1)
+		for _, k := range m.order {
+			if !valueEquiv(k, key) {
+				newOrder = append(newOrder, k)
+			}
+		}
+	}
+	return &PersistentMap{count: m.count - 1, root: newRoot, meta: m.meta, order: newOrder}
 }
 
 // --- Lookup interface ---
@@ -734,6 +769,15 @@ func (m *PersistentMap) Seq() Seq {
 func (m *PersistentMap) entries() []Value {
 	if m.root == nil {
 		return nil
+	}
+	if m.order != nil {
+		result := make([]Value, 0, m.count)
+		for _, k := range m.order {
+			if v, ok := m.root.find(0, hashValue(k), k); ok {
+				result = append(result, MapEntry{Key: k, Value: v})
+			}
+		}
+		return result
 	}
 	mes := m.root.nodeSeq()
 	result := make([]Value, len(mes))

@@ -27,6 +27,10 @@
   (testing "map creation"
     (is (= {} (hash-map)))
     (is (= {:a 1 :b 2} (hash-map :a 1 :b 2))))
+
+  (testing "map literals and array-map preserve insertion order"
+    (is (= '([:a 1] [:b 2] [:c 3]) (seq {:a 1 :b 2 :c 3})))
+    (is (= '([:a 1] [:b 2] [:c 3]) (seq (array-map :a 1 :b 2 :c 3)))))
   
   (testing "map access"
     (is (= 1 (get {:a 1 :b 2} :a)))

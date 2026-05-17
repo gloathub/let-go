@@ -990,10 +990,6 @@
   ([xform coll]
    (transformer-seq* xform coll)))
 
-;; array-map: in let-go, same as hash-map (we don't have a separate ArrayMap type)
-(defn array-map [& kvs]
-  (apply hash-map kvs))
-
 ;; rseq is a native builtin (supports vectors, sorted-map, sorted-set)
 
 ;; some-fn: complement of every-pred — returns first truthy result or false

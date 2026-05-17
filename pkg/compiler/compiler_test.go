@@ -37,7 +37,7 @@ func TestContext_Compile(t *testing.T) {
 		`'foo`:                                  "foo",
 		`(quote foo)`:                           "foo",
 		`{}`:                                    vm.EmptyPersistentMap,
-		`{:a 1}`:                                vm.NewPersistentMap([]vm.Value{vm.Keyword("a"), vm.Int(1)}),
+		`{:a 1}`:                                vm.NewArrayMap([]vm.Value{vm.Keyword("a"), vm.Int(1)}),
 	}
 	for k, v := range tests {
 		out, err := Eval(k)
