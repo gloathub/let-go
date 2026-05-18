@@ -1140,15 +1140,28 @@ func ToFloat(v Value) (float64, bool) {
 	return 0, false
 }
 
+func intFromFloat64(f float64) int {
+	switch {
+	case math.IsNaN(f):
+		return 0
+	case math.IsInf(f, 1) || f > float64(maxIntValue):
+		return int(maxIntValue)
+	case math.IsInf(f, -1) || f < float64(minIntValue):
+		return int(minIntValue)
+	default:
+		return int(f)
+	}
+}
+
 // ToInt converts a numeric Value to int if possible.
 func ToInt(v Value) (int, bool) {
 	switch n := v.(type) {
 	case Int:
 		return int(n), true
 	case Float:
-		return int(n), true
+		return intFromFloat64(float64(n)), true
 	case Float32:
-		return int(n), true
+		return intFromFloat64(float64(n)), true
 	case *BigInt:
 		if n.val.IsInt64() {
 			return int(n.val.Int64()), true
@@ -1161,10 +1174,10 @@ func ToInt(v Value) (int, bool) {
 		return 0, true
 	case *BigDecimal:
 		f, _ := n.Val().Float64()
-		return int(f), true
+		return intFromFloat64(f), true
 	case *Ratio:
 		f, _ := n.Val().Float64()
-		return int(f), true
+		return intFromFloat64(f), true
 	}
 	return 0, false
 }
