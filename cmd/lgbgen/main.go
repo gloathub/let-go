@@ -1,5 +1,7 @@
+//go:build bootstrap
+
 // lgbgen compiles core.lg and all embedded namespaces into a pre-compiled .lgb bundle.
-// Usage: go run ./cmd/lgbgen [output-path]
+// Usage: go run -tags bootstrap ./cmd/lgbgen [output-path]
 // Default output: pkg/rt/core_compiled.lgb (when run from repo root)
 package main
 

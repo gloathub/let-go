@@ -28,7 +28,7 @@ run: $(LG)
 build: $(LG)
 
 generate: $(GO)
-	go run ./cmd/lgbgen
+	go run -tags bootstrap ./cmd/lgbgen
 
 $(LG): $(GO) lg.go pkg/**/*
 	which go

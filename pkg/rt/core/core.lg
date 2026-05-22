@@ -18,6 +18,15 @@
   (list 'do (cons 'defn (cons name (cons args body))) (list 'set-macro! (list 'var name))))
 (set-macro! (var defmacro))
 
+(defmacro def- [name form]
+  `(def ^:private ~name ~form))
+
+(defmacro defn- [name & forms]
+  `(def ^:private ~name (fn ~@forms)))
+
+(defmacro declare [name]
+  (list 'def name nil))
+
 (defmacro comment [& _] nil)
 
 ; define let as alias to let* for now
@@ -66,6 +75,17 @@
 (def <= le)
 
 (def parse-long parse-int)
+
+(declare odd?)
+(declare dec)
+(declare inc)
+(declare map)
+(declare integer?)
+(declare keyword?)
+(declare symbol?)
+(declare sequential?)
+(declare distinct)
+(declare list*)
 
 ;; lazy-seq macro - wraps body in a thunk that produces a seq when realized
 ;; Expands to: (lazy-seq* (fn [] body...))
@@ -409,6 +429,27 @@
              (cons x (filter f r))
              (filter f r))))))))
 
+(defmacro if-let
+  ([bindings then]
+   `(if-let ~bindings ~then nil))
+  ([bindings then else]
+   (let [form (bindings 0) tst (bindings 1)]
+     `(let [temp# ~tst]
+        (if temp#
+          (let [~form temp#]
+            ~then)
+          ~else)))))
+
+(defmacro when-let
+  [bindings & body]
+  (if (not (= 2 (count bindings)))
+    (throw "when-let requires exactly two forms in binding vector")
+    (let [form (bindings 0) tst (bindings 1)]
+      `(let [temp# ~tst]
+         (when temp#
+           (let [~form temp#]
+             ~@body))))))
+
 (defn take
   ([n]
    (fn [rf]
@@ -678,13 +719,6 @@
   (let [forms (if (string? (first forms)) (next forms) forms)]
     `(def ~name (fn ~@forms))))
 
-(defmacro def- [name form]
-  `(def ^:private ~name ~form))
-
-(defmacro defn- [name & forms]
-  (let [forms (if (string? (first forms)) (next forms) forms)]
-    `(def ^:private ~name (fn ~@forms))))
-
 (defmacro while [test & body]
   `(loop* [] (when ~test ~@body (recur))))
 
@@ -794,27 +828,6 @@
 
 (defn reverse [coll]
   (reduce conj () coll))
-
-(defmacro if-let
-  ([bindings then]
-   `(if-let ~bindings ~then nil))
-  ([bindings then else]
-   (let [form (bindings 0) tst (bindings 1)]
-     `(let [temp# ~tst]
-        (if temp#
-          (let [~form temp#]
-            ~then)
-          ~else)))))
-
-(defmacro when-let
-  [bindings & body]
-  (if (not (= 2 (count bindings)))
-    (throw "when-let requires exactly two forms in binding vector")
-    (let [form (bindings 0) tst (bindings 1)]
-      `(let [temp# ~tst]
-         (when temp#
-           (let [~form temp#]
-             ~@body))))))
 
 (defmacro when-first
   [bindings & body]
