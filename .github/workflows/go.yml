@@ -32,11 +32,20 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Regenerate bundled bytecode
+        run: go generate ./pkg/rt/
+
       - name: Build
         run: go build -v ./...
 
-      - name: Test
+      - name: Test with bundled bytecode stdlib
         run: go test -v -timeout 60s ./... -skip TestClojureTestSuite
 
-      - name: Clojure compatibility test suite
+      - name: Clojure compatibility test suite with bundled bytecode stdlib
         run: go test ./test/ -count=1 -run TestClojureTestSuite -v
+
+      - name: Test with source stdlib bootstrap
+        run: go test -tags bootstrap -v -timeout 60s ./... -skip TestClojureTestSuite
+
+      - name: Clojure compatibility test suite with source stdlib bootstrap
+        run: go test -tags bootstrap ./test/ -count=1 -run TestClojureTestSuite -v

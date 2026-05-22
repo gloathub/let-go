@@ -64,7 +64,9 @@ func evalInit() {
 	}
 
 	// Original path: compile from source
-	_, err := Eval(rt.CoreSrc)
+	c := NewCompiler(consts, rt.NS(rt.NameCoreNS))
+	c.SetSource("<embedded:core>")
+	_, _, err := c.CompileMultiple(strings.NewReader(rt.CoreSrc))
 	if err != nil {
 		panic("core.lg compilation failed: " + err.Error())
 	}
