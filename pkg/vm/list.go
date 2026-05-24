@@ -12,16 +12,16 @@ import (
 
 type theListType struct{}
 
-func (t *theListType) String() string     { return t.Name() }
-func (t *theListType) Type() ValueType    { return TypeType }
-func (t *theListType) Unbox() interface{} { return reflect.TypeOf(t) }
+func (t *theListType) String() string  { return t.Name() }
+func (t *theListType) Type() ValueType { return TypeType }
+func (t *theListType) Unbox() any      { return reflect.TypeFor[*theListType]() }
 
-func (lt *theListType) Name() string { return "let-go.lang.PersistentList" }
+func (t *theListType) Name() string { return "let-go.lang.PersistentList" }
 
-func (lt *theListType) Box(bare interface{}) (Value, error) {
+func (t *theListType) Box(bare any) (Value, error) {
 	arr, ok := bare.([]Value)
 	if !ok {
-		return EmptyList, NewTypeError(bare, "can't be boxed as", lt)
+		return EmptyList, NewTypeError(bare, "can't be boxed as", t)
 	}
 	var ret Seq = EmptyList
 	n := len(arr)
@@ -85,7 +85,7 @@ func (l *List) Conj(value Value) Collection {
 func (l *List) Type() ValueType { return ListType }
 
 // Unbox implements Value
-func (l *List) Unbox() interface{} {
+func (l *List) Unbox() any {
 	if l.count == 0 {
 		return []Value{}
 	}

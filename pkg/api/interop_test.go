@@ -44,7 +44,7 @@ func TestDef(t *testing.T) {
 	assert.NoError(t, err)
 	tests := []struct {
 		code   string
-		result interface{}
+		result any
 	}{
 		{"(def y (+ x 11))", 13},
 		{"(f x y)", 26},
@@ -77,13 +77,13 @@ func TestChannels(t *testing.T) {
 	assert.NoError(t, err)
 
 	go func() {
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			inch <- i
 		}
 		close(inch)
 	}()
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		j := <-outch
 		assert.Equal(t, i+1, j.Unbox())
 	}

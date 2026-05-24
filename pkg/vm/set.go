@@ -13,13 +13,13 @@ import (
 
 type theSetType struct{}
 
-func (t *theSetType) String() string     { return t.Name() }
-func (t *theSetType) Type() ValueType    { return TypeType }
-func (t *theSetType) Unbox() interface{} { return reflect.TypeOf(t) }
+func (t *theSetType) String() string  { return t.Name() }
+func (t *theSetType) Type() ValueType { return TypeType }
+func (t *theSetType) Unbox() any      { return reflect.TypeFor[*theSetType]() }
 
 func (t *theSetType) Name() string { return "let-go.lang.Set" }
 
-func (t *theSetType) Box(bare interface{}) (Value, error) {
+func (t *theSetType) Box(bare any) (Value, error) {
 	return NIL, NewTypeError(bare, "can't be boxed as", t)
 }
 
@@ -87,7 +87,7 @@ func (l Set) keys() []Value {
 }
 
 // Unbox implements Value
-func (l Set) Unbox() interface{} {
+func (l Set) Unbox() any {
 	return l.keys()
 }
 
@@ -146,8 +146,8 @@ func (s *SetSeq) String() string {
 	return b.String()
 }
 
-func (s *SetSeq) Type() ValueType    { return ListType }
-func (s *SetSeq) Unbox() interface{} { return s.keys[s.i:] }
+func (s *SetSeq) Type() ValueType { return ListType }
+func (s *SetSeq) Unbox() any      { return s.keys[s.i:] }
 
 func (s *SetSeq) First() Value {
 	if s.i >= len(s.keys) {

@@ -12,12 +12,12 @@ import (
 
 type theNativeFnType struct{}
 
-func (t *theNativeFnType) String() string     { return t.Name() }
-func (t *theNativeFnType) Type() ValueType    { return TypeType }
-func (t *theNativeFnType) Unbox() interface{} { return reflect.TypeOf(t) }
+func (t *theNativeFnType) String() string  { return t.Name() }
+func (t *theNativeFnType) Type() ValueType { return TypeType }
+func (t *theNativeFnType) Unbox() any      { return reflect.TypeFor[*theNativeFnType]() }
 
 func (t *theNativeFnType) Name() string { return "let-go.lang.NativeFn" }
-func (t *theNativeFnType) Box(fn interface{}) (Value, error) {
+func (t *theNativeFnType) Box(fn any) (Value, error) {
 	ty := reflect.TypeOf(fn)
 	if ty.Kind() != reflect.Func {
 		return NIL, NewTypeError(fn, "can't be boxed into", t)
@@ -62,7 +62,7 @@ func (t *theNativeFnType) Box(fn interface{}) (Value, error) {
 		if err != nil {
 			return NIL, err
 		}
-		errorInterface := reflect.TypeOf((*error)(nil)).Elem()
+		errorInterface := reflect.TypeFor[error]()
 		if res[1].Type() == errorInterface && res[1].Interface() != nil {
 			return wv, res[1].Interface().(error)
 		}
@@ -126,7 +126,7 @@ type NativeFn struct {
 	name        string
 	arity       int
 	isVariadric bool
-	fn          interface{}
+	fn          any
 	proxy       func([]Value) (Value, error)
 }
 
@@ -135,7 +135,7 @@ func (l *NativeFn) SetName(n string) { l.name = n }
 func (l *NativeFn) Type() ValueType { return NativeFnType }
 
 // Unbox implements Unbox
-func (l *NativeFn) Unbox() interface{} {
+func (l *NativeFn) Unbox() any {
 	return l.fn
 }
 

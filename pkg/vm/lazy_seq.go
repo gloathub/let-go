@@ -110,8 +110,8 @@ func (l *LazySeq) String() string {
 	return s.String()
 }
 
-func (l *LazySeq) Type() ValueType    { return ListType }
-func (l *LazySeq) Unbox() interface{} { return l.seq() }
+func (l *LazySeq) Type() ValueType { return ListType }
+func (l *LazySeq) Unbox() any      { return l.seq() }
 
 func (l *LazySeq) First() Value {
 	s := l.Resolve()

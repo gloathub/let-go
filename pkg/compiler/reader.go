@@ -419,7 +419,7 @@ func readRegex(r *LispReader, _ rune) (vm.Value, error) {
 // handling.
 func readHexEscape(r *LispReader) (int, error) {
 	hex := ""
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		ch, err := r.next()
 		if err != nil || !isHexDigit(ch) {
 			return 0, NewReaderError(r, fmt.Sprintf("invalid escape sequence \\u%s", hex))
@@ -623,10 +623,9 @@ func readNumber(r *LispReader, ru rune) (vm.Value, error) {
 
 func readList(r *LispReader, _ rune) (vm.Value, error) {
 	startLine := r.line
-	startCol := r.column - 1 // -1 because '(' was already consumed
-	if startCol < 0 {
-		startCol = 0
-	}
+	startCol := max(
+		// -1 because '(' was already consumed
+		r.column-1, 0)
 	var ret []vm.Value
 	for {
 		ch2, err := r.eatWhitespace()
@@ -658,10 +657,7 @@ func readList(r *LispReader, _ rune) (vm.Value, error) {
 
 func readVector(r *LispReader, _ rune) (vm.Value, error) {
 	startLine := r.line
-	startCol := r.column - 1
-	if startCol < 0 {
-		startCol = 0
-	}
+	startCol := max(r.column-1, 0)
 	ret := make([]vm.Value, 0)
 	for {
 		ch2, err := r.eatWhitespace()
@@ -690,10 +686,7 @@ func readVector(r *LispReader, _ rune) (vm.Value, error) {
 
 func readMap(r *LispReader, _ rune) (vm.Value, error) {
 	startLine := r.line
-	startCol := r.column - 1
-	if startCol < 0 {
-		startCol = 0
-	}
+	startCol := max(r.column-1, 0)
 	ret := make([]vm.Value, 0)
 	for {
 		ch2, err := r.eatWhitespace()
@@ -731,10 +724,9 @@ func readMap(r *LispReader, _ rune) (vm.Value, error) {
 
 func readSet(r *LispReader, _ rune) (vm.Value, error) {
 	startLine := r.line
-	startCol := r.column - 2 // -2 because '#' and '{' were consumed
-	if startCol < 0 {
-		startCol = 0
-	}
+	startCol := max(
+		// -2 because '#' and '{' were consumed
+		r.column-2, 0)
 	ret := vm.EmptyList
 	for {
 		ch2, err := r.eatWhitespace()
@@ -1003,10 +995,9 @@ func readVarQuote(r *LispReader, _ rune) (vm.Value, error) {
 
 func readShortFn(r *LispReader, _ rune) (vm.Value, error) {
 	startLine := r.line
-	startCol := r.column - 2 // -2 because '#' and '(' were consumed
-	if startCol < 0 {
-		startCol = 0
-	}
+	startCol := max(
+		// -2 because '#' and '(' were consumed
+		r.column-2, 0)
 	var ret []vm.Value
 	r.maxPercent = 0
 	for {
@@ -1167,9 +1158,10 @@ func skipReaderForm(r *LispReader) {
 				return
 			}
 			if inString {
-				if c == '\\' {
+				switch c {
+				case '\\':
 					r.next() // skip escaped char
-				} else if c == '"' {
+				case '"':
 					inString = false
 				}
 				continue

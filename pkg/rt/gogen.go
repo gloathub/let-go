@@ -38,9 +38,9 @@ type theGoASTType struct{}
 
 func (t *theGoASTType) String() string     { return t.Name() }
 func (t *theGoASTType) Type() vm.ValueType { return vm.TypeType }
-func (t *theGoASTType) Unbox() interface{} { return reflect.TypeOf(t) }
+func (t *theGoASTType) Unbox() any         { return reflect.TypeFor[*theGoASTType]() }
 func (t *theGoASTType) Name() string       { return "let-go.lang.GoAST" }
-func (t *theGoASTType) Box(_ interface{}) (vm.Value, error) {
+func (t *theGoASTType) Box(_ any) (vm.Value, error) {
 	return vm.NIL, fmt.Errorf("gogen: GoAST values are constructed via gogen/* fns, not boxed")
 }
 
@@ -50,7 +50,7 @@ type goASTValue struct{ node ast.Node }
 
 func (g *goASTValue) String() string     { return fmt.Sprintf("#<go-ast %T>", g.node) }
 func (g *goASTValue) Type() vm.ValueType { return GoASTType }
-func (g *goASTValue) Unbox() interface{} { return g.node }
+func (g *goASTValue) Unbox() any         { return g.node }
 
 func box(n ast.Node) vm.Value {
 	if n == nil {

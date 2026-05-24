@@ -35,8 +35,8 @@ func NewPersistentSet(vals []Value) *PersistentSet {
 
 // --- Value interface ---
 
-func (s *PersistentSet) Type() ValueType    { return SetType }
-func (s *PersistentSet) Unbox() interface{} { return s.keys() }
+func (s *PersistentSet) Type() ValueType { return SetType }
+func (s *PersistentSet) Unbox() any      { return s.keys() }
 
 func (s *PersistentSet) String() string {
 	b := &strings.Builder{}

@@ -16,13 +16,13 @@ type theFloatType struct {
 	zero Float
 }
 
-func (t *theFloatType) String() string     { return t.Name() }
-func (t *theFloatType) Type() ValueType    { return TypeType }
-func (t *theFloatType) Unbox() interface{} { return reflect.TypeOf(t) }
+func (t *theFloatType) String() string  { return t.Name() }
+func (t *theFloatType) Type() ValueType { return TypeType }
+func (t *theFloatType) Unbox() any      { return reflect.TypeFor[*theFloatType]() }
 
 func (t *theFloatType) Name() string { return "let-go.lang.Float" }
 
-func (t *theFloatType) Box(bare interface{}) (Value, error) {
+func (t *theFloatType) Box(bare any) (Value, error) {
 	raw, ok := bare.(float64)
 	if !ok {
 		return FloatType.zero, NewTypeError(bare, "can't be boxed as", t)
@@ -53,11 +53,11 @@ func (l Float) Type() ValueType   { return FloatType }
 func (l Float32) Type() ValueType { return FloatType }
 
 // Unbox implements Unbox
-func (l Float) Unbox() interface{} {
+func (l Float) Unbox() any {
 	return float64(l)
 }
 
-func (l Float32) Unbox() interface{} {
+func (l Float32) Unbox() any {
 	return float64(l)
 }
 

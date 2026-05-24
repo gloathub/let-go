@@ -100,7 +100,7 @@ func NewReader(r io.Reader) *Reader {
 func (r *Reader) ReadVarint() (uint64, error) {
 	var result uint64
 	var shift uint
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		b, err := r.r.ReadByte()
 		if err != nil {
 			return 0, err

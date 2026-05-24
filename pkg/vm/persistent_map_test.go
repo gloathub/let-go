@@ -92,13 +92,13 @@ func TestPersistentMapEmpty(t *testing.T) {
 func TestPersistentMapLarge(t *testing.T) {
 	m := EmptyPersistentMap
 	n := 1000
-	for i := 0; i < n; i++ {
+	for i := range n {
 		m = m.Assoc(Int(i), Int(i*10)).(*PersistentMap)
 	}
 	if m.RawCount() != n {
 		t.Errorf("expected count %d, got %d", n, m.RawCount())
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		v := m.ValueAt(Int(i))
 		if v != Int(i*10) {
 			t.Errorf("at key %d: expected %d, got %v", i, i*10, v)
@@ -318,14 +318,14 @@ func TestPersistentMapHashCollision(t *testing.T) {
 	// With 1000+ keys, some will share prefix bits and exercise deeper trie levels.
 	m := EmptyPersistentMap
 	n := 500
-	for i := 0; i < n; i++ {
+	for i := range n {
 		k := String(fmt.Sprintf("key-%d", i))
 		m = m.Assoc(k, Int(i)).(*PersistentMap)
 	}
 	if m.RawCount() != n {
 		t.Fatalf("expected count %d, got %d", n, m.RawCount())
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		k := String(fmt.Sprintf("key-%d", i))
 		v := m.ValueAt(k)
 		if v != Int(i) {
@@ -341,7 +341,7 @@ func TestPersistentMapHashCollision(t *testing.T) {
 	if m.RawCount() != expectedCount {
 		t.Fatalf("after dissoc expected count %d, got %d", expectedCount, m.RawCount())
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		k := String(fmt.Sprintf("key-%d", i))
 		v := m.ValueAt(k)
 		if i%2 == 0 {
@@ -363,7 +363,7 @@ func TestPersistentMapCollisionNode(t *testing.T) {
 	cn := &hmapCollisionNode{
 		hash:  12345,
 		count: 2,
-		array: []interface{}{Keyword("a"), Int(1), Keyword("b"), Int(2)},
+		array: []any{Keyword("a"), Int(1), Keyword("b"), Int(2)},
 	}
 
 	// find
@@ -416,11 +416,11 @@ func TestPersistentMapCollisionNode(t *testing.T) {
 func TestPersistentMapLargeDissoc(t *testing.T) {
 	m := EmptyPersistentMap
 	n := 200
-	for i := 0; i < n; i++ {
+	for i := range n {
 		m = m.Assoc(Int(i), Int(i)).(*PersistentMap)
 	}
 	// Remove all
-	for i := 0; i < n; i++ {
+	for i := range n {
 		m = m.Dissoc(Int(i)).(*PersistentMap)
 	}
 	if m.RawCount() != 0 {

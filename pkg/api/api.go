@@ -32,7 +32,7 @@ func (l *LetGo) SetLoadPath(path []string) {
 	l.loader.SetPath(path)
 }
 
-func (l *LetGo) Def(name string, value interface{}) error {
+func (l *LetGo) Def(name string, value any) error {
 	val, err := vm.BoxValue(reflect.ValueOf(value))
 	if err != nil {
 		return err

@@ -261,17 +261,14 @@ type Frame struct {
 // framePool reuses Frame structs to avoid per-call heap allocation.
 // The stack slice is kept and grown as needed; references are cleared on release.
 var framePool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return &Frame{}
 	},
 }
 
 func NewFrame(code *CodeChunk, args []Value) *Frame {
 	f := framePool.Get().(*Frame)
-	needed := code.maxStack
-	if needed < 4 {
-		needed = 4
-	}
+	needed := max(code.maxStack, 4)
 	if cap(f.stack) >= needed {
 		f.stack = f.stack[:needed]
 	} else {

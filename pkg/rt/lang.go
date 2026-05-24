@@ -3424,7 +3424,7 @@ func installLangNS() {
 			return vm.NIL, fmt.Errorf("format expected String")
 		}
 		fmts := string(fmtStr)
-		args := make([]interface{}, len(vs)-1)
+		args := make([]any, len(vs)-1)
 		// Scan format string to determine which args need float promotion
 		vi := 0
 		for fi := 0; fi < len(fmts) && vi < len(args); fi++ {
@@ -3536,7 +3536,7 @@ func installLangNS() {
 		}
 		// Fallback: iterate
 		s, _ := seqOf(vs[0])
-		for i := 0; i < idx; i++ {
+		for range idx {
 			s = s.Next()
 		}
 		return s.First(), nil
@@ -5521,7 +5521,7 @@ func installLangNS() {
 				return vm.NIL, nil
 			}
 			var s vm.Seq = vm.EmptyList
-			for i := 0; i < n; i++ {
+			for i := range n {
 				s = vm.NewCons(v[i], s)
 			}
 			return s, nil
@@ -5531,7 +5531,7 @@ func installLangNS() {
 				return vm.NIL, nil
 			}
 			var s vm.Seq = vm.EmptyList
-			for i := 0; i < n; i++ {
+			for i := range n {
 				s = vm.NewCons(v.ValueAt(vm.MakeInt(i)), s)
 			}
 			return s, nil
@@ -5917,7 +5917,7 @@ func installLangNS() {
 				arr = vm.NewObjectArray(size)
 			}
 			if len(vs) == 2 {
-				for i := 0; i < size; i++ {
+				for i := range size {
 					if err := arr.Set(i, vs[1]); err != nil {
 						return vm.NIL, err
 					}

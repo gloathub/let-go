@@ -15,13 +15,13 @@ type theStringType struct {
 	zero String
 }
 
-func (t *theStringType) String() string     { return t.Name() }
-func (t *theStringType) Type() ValueType    { return TypeType }
-func (t *theStringType) Unbox() interface{} { return reflect.TypeOf(t) }
+func (t *theStringType) String() string  { return t.Name() }
+func (t *theStringType) Type() ValueType { return TypeType }
+func (t *theStringType) Unbox() any      { return reflect.TypeFor[*theStringType]() }
 
 func (t *theStringType) Name() string { return "let-go.lang.String" }
 
-func (t *theStringType) Box(bare interface{}) (Value, error) {
+func (t *theStringType) Box(bare any) (Value, error) {
 	raw, ok := bare.(string)
 	if !ok {
 		return StringType.zero, NewTypeError(bare, "can't be boxed as", t)
@@ -58,7 +58,7 @@ func (l String) Hash() uint32 { return hashString(string(l)) }
 func (l String) Type() ValueType { return StringType }
 
 // Unbox implements Unbox
-func (l String) Unbox() interface{} {
+func (l String) Unbox() any {
 	return string(l)
 }
 
@@ -66,15 +66,15 @@ func (l String) InvokeMethod(name Symbol, args []Value) (Value, error) {
 	switch name {
 	case "replace":
 		if len(args) != 2 {
-			return NIL, fmt.Errorf("String.replace expected 2 arguments")
+			return NIL, fmt.Errorf("string.replace expected 2 arguments")
 		}
 		old, ok := args[0].(String)
 		if !ok {
-			return NIL, fmt.Errorf("String.replace expected String target")
+			return NIL, fmt.Errorf("string.replace expected string target")
 		}
 		repl, ok := args[1].(String)
 		if !ok {
-			return NIL, fmt.Errorf("String.replace expected String replacement")
+			return NIL, fmt.Errorf("string.replace expected string replacement")
 		}
 		return String(strings.ReplaceAll(string(l), string(old), string(repl))), nil
 	case "getBytes":
@@ -86,17 +86,17 @@ func (l String) InvokeMethod(name Symbol, args []Value) (Value, error) {
 		if len(args) == 1 {
 			enc, ok := args[0].(String)
 			if !ok {
-				return NIL, fmt.Errorf("String.getBytes encoding must be String, got %s", args[0].Type().Name())
+				return NIL, fmt.Errorf("string.getBytes encoding must be string, got %s", args[0].Type().Name())
 			}
 			e := strings.ToUpper(string(enc))
 			if e != "UTF-8" && e != "UTF8" {
-				return NIL, fmt.Errorf("String.getBytes: only UTF-8 supported, got %q", string(enc))
+				return NIL, fmt.Errorf("string.getBytes: only UTF-8 supported, got %q", string(enc))
 			}
 			return NewByteArrayFrom([]byte(string(l))), nil
 		}
-		return NIL, fmt.Errorf("String.getBytes expected 0 or 1 argument, got %d", len(args))
+		return NIL, fmt.Errorf("string.getBytes expected 0 or 1 argument, got %d", len(args))
 	default:
-		return NIL, fmt.Errorf("method %s not found on String", name)
+		return NIL, fmt.Errorf("method %s not found on string", name)
 	}
 }
 

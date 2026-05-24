@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -378,9 +379,7 @@ func buildWasm(ctx *compiler.Context, nsRes *resolver.NSResolver, src string, ou
 	if len(nsRes.LoadedChunks) > 0 {
 		mainNS := ctx.CurrentNS().Name()
 		nsChunks := make(map[string]*vm.CodeChunk, len(nsRes.LoadedChunks)+1)
-		for k, v := range nsRes.LoadedChunks {
-			nsChunks[k] = v
-		}
+		maps.Copy(nsChunks, nsRes.LoadedChunks)
 		nsChunks[mainNS] = chunk
 		nsOrder := append(nsRes.LoadOrder, mainNS)
 		if err := bytecode.EncodeBundleOrdered(&lgbBuf, ctx.Consts(), nsChunks, nsOrder); err != nil {

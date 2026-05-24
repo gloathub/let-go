@@ -14,12 +14,12 @@ import (
 type theAtomType struct {
 }
 
-func (t *theAtomType) String() string     { return t.Name() }
-func (t *theAtomType) Type() ValueType    { return TypeType }
-func (t *theAtomType) Unbox() interface{} { return reflect.TypeOf(t) }
+func (t *theAtomType) String() string  { return t.Name() }
+func (t *theAtomType) Type() ValueType { return TypeType }
+func (t *theAtomType) Unbox() any      { return reflect.TypeFor[*theAtomType]() }
 
 func (t *theAtomType) Name() string { return "let-go.lang.Atom" }
-func (t *theAtomType) Box(b interface{}) (Value, error) {
+func (t *theAtomType) Box(b any) (Value, error) {
 	val, err := BoxValue(reflect.ValueOf(b))
 	if err != nil {
 		return NIL, err
@@ -194,18 +194,18 @@ func (a *Atom) Deref() Value {
 	return v
 }
 
-func (v *Atom) Type() ValueType {
+func (a *Atom) Type() ValueType {
 	return AtomType
 }
 
-func (v *Atom) Unbox() interface{} {
-	return v
+func (a *Atom) Unbox() any {
+	return a
 }
 
-func (v *Atom) Hash() uint32 {
-	return hashString(fmt.Sprintf("%p", v))
+func (a *Atom) Hash() uint32 {
+	return hashString(fmt.Sprintf("%p", a))
 }
 
-func (v *Atom) String() string {
-	return fmt.Sprintf("<%s %s>", AtomType, v.Deref())
+func (a *Atom) String() string {
+	return fmt.Sprintf("<%s %s>", AtomType, a.Deref())
 }
