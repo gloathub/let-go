@@ -80,7 +80,7 @@ func init() {
 
 	// Register global namespace lookup so qualified symbols (foo/x) work
 	vm.SetNSLookup(func(name string) *vm.Namespace {
-		return nsRegistry[resolveNSAlias(name)]
+		return LookupOrRegisterNS(resolveNSAlias(name))
 	})
 
 	// Wire up ValueEquals for OP_EQ fast path in the VM
@@ -124,6 +124,17 @@ func FuzzyNamespacedSymbolLookup(currentNS *vm.Namespace, s vm.Symbol) []vm.Symb
 
 func NS(name string) *vm.Namespace {
 	return LookupOrRegisterNS(resolveNSAlias(name))
+}
+
+// RequireNS loads/materializes a namespace and reports an error when a loader
+// is configured but the namespace could not be loaded.
+func RequireNS(name string) (*vm.Namespace, error) {
+	canonical := resolveNSAlias(name)
+	ns := LookupOrRegisterNS(canonical)
+	if nsLoader != nil && nsNeedsLoad[canonical] {
+		return nil, fmt.Errorf("unable to load namespace %s", name)
+	}
+	return ns, nil
 }
 
 func RegisterNS(namespace *vm.Namespace) *vm.Namespace {
@@ -171,25 +182,33 @@ func DefNSBare(name string) *vm.Namespace {
 
 func LookupOrRegisterNS(name string) *vm.Namespace {
 	e := nsRegistry[name]
-	if e != nil && !nsNeedsLoad[name] {
+	needsLoad := nsNeedsLoad[name]
+	if e != nil && !needsLoad {
 		return e
 	}
 	if nsLoader != nil {
-		// Clear the flag before loading to prevent re-entrancy loops
-		delete(nsNeedsLoad, name)
 		n := nsLoader.Load(name)
 		if n != nil {
 			nsRegistry[name] = n
+			delete(nsNeedsLoad, name)
 			return n
 		}
 	}
-	// Check if loading side-effected the registry (in-ns during load creates the ns)
+	// Check if loading side-effected the registry (in-ns during load creates the ns).
+	// If loader is configured and failed, keep NeedsLoad true so later lookups retry.
 	if e := nsRegistry[name]; e != nil {
-		delete(nsNeedsLoad, name)
+		if nsLoader != nil {
+			nsNeedsLoad[name] = true
+		} else {
+			delete(nsNeedsLoad, name)
+		}
 		return e
 	}
 	nsRegistry[name] = vm.NewNamespace(name)
 	nsRegistry[name].Refer(CoreNS, "", true)
+	if nsLoader != nil {
+		nsNeedsLoad[name] = true
+	}
 	return nsRegistry[name]
 }
 
@@ -984,6 +1003,7 @@ func roundRatToInt(r *big.Rat, sign int, modeName string) (*big.Int, error) {
 }
 
 // nolint
+
 func installLangNS() {
 	plus, err := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) == 0 {
@@ -4091,7 +4111,9 @@ func installLangNS() {
 		for _, v := range vs {
 			switch arg := v.(type) {
 			case vm.Symbol:
-				NS(string(arg)) // triggers autoloading
+				if _, err := RequireNS(string(arg)); err != nil {
+					return vm.NIL, err
+				}
 			case vm.ArrayVector:
 				// Vector form: [ns-name :as alias] or [ns-name :refer [syms...]]
 				if arg.RawCount() < 1 {
@@ -4101,7 +4123,10 @@ func installLangNS() {
 				if !ok {
 					return vm.NIL, fmt.Errorf("require: first element must be a symbol")
 				}
-				target := NS(string(nsName))
+				target, err := RequireNS(string(nsName))
+				if err != nil {
+					return vm.NIL, err
+				}
 				// Parse options
 				for i := 1; i < arg.RawCount()-1; i += 2 {
 					opt := arg.ValueAt(vm.Int(int64(i)))
@@ -6354,6 +6379,16 @@ func installLangNS() {
 				return existing, nil
 			}
 			return targetNS.Def(string(sym), vm.NIL), nil
+		}
+		// 3-arg form. If the Var already exists, UPDATE its root in
+		// place; otherwise create a fresh Var. This matters when
+		// other compiled code holds a captured Var pointer in its
+		// const pool — recreating the Var would leave those pointers
+		// referencing the old nil-rooted Var (the chicken-and-egg
+		// problem from Phase F's data-layer rollout).
+		if existing := targetNS.LookupLocal(sym); existing != nil {
+			existing.SetRoot(vs[2])
+			return existing, nil
 		}
 		v := targetNS.Def(string(sym), vs[2])
 		return v, nil
