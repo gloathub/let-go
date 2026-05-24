@@ -7,6 +7,7 @@ package vm
 
 import (
 	"fmt"
+	"maps"
 	"sync"
 )
 
@@ -174,9 +175,7 @@ func (v *Var) notifyWatches(oldVal, newVal Value) error {
 		return nil
 	}
 	watches := make(map[Value]Fn, len(v.watches))
-	for key, fn := range v.watches {
-		watches[key] = fn
-	}
+	maps.Copy(watches, v.watches)
 	v.mu.Unlock()
 	for key, fn := range watches {
 		if _, err := fn.Invoke([]Value{key, v, oldVal, newVal}); err != nil {
@@ -224,7 +223,7 @@ func (v *Var) Type() ValueType {
 	return v.Deref().Type()
 }
 
-func (v *Var) Unbox() interface{} {
+func (v *Var) Unbox() any {
 	return v.Deref().Unbox()
 }
 

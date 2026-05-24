@@ -956,7 +956,7 @@ func makeBundleChunks(consts *vm.Consts) map[string]*vm.CodeChunk {
 func TestEncodeBundleOrderedIsDeterministic(t *testing.T) {
 	order := []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot"}
 	var first []byte
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		consts := vm.NewConsts()
 		chunks := makeBundleChunks(consts)
 		var buf bytes.Buffer
@@ -977,7 +977,7 @@ func TestEncodeBundleOrderedIsDeterministic(t *testing.T) {
 // produces byte-identical output across runs (it sorts NS names internally).
 func TestEncodeBundleIsDeterministic(t *testing.T) {
 	var first []byte
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		consts := vm.NewConsts()
 		chunks := makeBundleChunks(consts)
 		var buf bytes.Buffer
@@ -1016,10 +1016,10 @@ func BenchmarkEncodeModule(b *testing.B) {
 	chunk.SetMaxStack(1)
 	mb.AddChunk(chunk)
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		mb.AddConst(vm.Int(i))
 	}
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		mb.AddConst(vm.Keyword("key"))
 	}
 	m := mb.Build()
@@ -1040,10 +1040,10 @@ func BenchmarkDecodeModule(b *testing.B) {
 	chunk.SetMaxStack(1)
 	mb.AddChunk(chunk)
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		mb.AddConst(vm.Int(i))
 	}
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		mb.AddConst(vm.Keyword("key"))
 	}
 	m := mb.Build()

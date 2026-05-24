@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,9 +193,7 @@ func bundleBinary(ctx *compiler.Context, nsRes *resolver.NSResolver, src string,
 	if len(nsRes.LoadedChunks) > 0 {
 		mainNS := ctx.CurrentNS().Name()
 		nsChunks := make(map[string]*vm.CodeChunk, len(nsRes.LoadedChunks)+1)
-		for k, v := range nsRes.LoadedChunks {
-			nsChunks[k] = v
-		}
+		maps.Copy(nsChunks, nsRes.LoadedChunks)
 		nsChunks[mainNS] = chunk
 		nsOrder := append(nsRes.LoadOrder, mainNS)
 		if err := bytecode.EncodeBundleOrdered(&lgbBuf, ctx.Consts(), nsChunks, nsOrder); err != nil {
@@ -299,9 +298,7 @@ func compileLG(ctx *compiler.Context, nsRes *resolver.NSResolver, src string, ds
 		// Include the main chunk under its namespace name, last in order
 		mainNS := ctx.CurrentNS().Name()
 		nsChunks := make(map[string]*vm.CodeChunk, len(nsRes.LoadedChunks)+1)
-		for k, v := range nsRes.LoadedChunks {
-			nsChunks[k] = v
-		}
+		maps.Copy(nsChunks, nsRes.LoadedChunks)
 		nsChunks[mainNS] = chunk
 		nsOrder := append(nsRes.LoadOrder, mainNS)
 		return bytecode.EncodeBundleOrdered(out, ctx.Consts(), nsChunks, nsOrder)

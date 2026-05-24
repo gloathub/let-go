@@ -19,14 +19,14 @@ import (
 //	TypeError: (encountered type name) ... message ... (expected type name)
 type TypeError struct {
 	message  string
-	value    interface{}
+	value    any
 	expected ValueType
 	cause    error
 }
 
 // NewTypeError creates a new type error. This error will print the
 // problematic value's (either interface{} or Value) type name, a message, and expected type name.
-func NewTypeError(value interface{}, message string, expected ValueType) *TypeError {
+func NewTypeError(value any, message string, expected ValueType) *TypeError {
 	return &TypeError{
 		message:  message,
 		expected: expected,

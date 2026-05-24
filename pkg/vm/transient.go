@@ -35,9 +35,9 @@ func (t *TransientMap) ensureEditable() error {
 	return nil
 }
 
-func (t *TransientMap) Type() ValueType    { return TransientMapType }
-func (t *TransientMap) Unbox() interface{} { return t }
-func (t *TransientMap) String() string     { return fmt.Sprintf("<transient-map count=%d>", t.count) }
+func (t *TransientMap) Type() ValueType { return TransientMapType }
+func (t *TransientMap) Unbox() any      { return t }
+func (t *TransientMap) String() string  { return fmt.Sprintf("<transient-map count=%d>", t.count) }
 
 // Assoc mutates the transient map in place.
 func (t *TransientMap) Assoc(key Value, val Value) (*TransientMap, error) {
@@ -198,8 +198,8 @@ func (t *TransientVector) ensureEditable() error {
 	return nil
 }
 
-func (t *TransientVector) Type() ValueType    { return TransientVectorType }
-func (t *TransientVector) Unbox() interface{} { return t }
+func (t *TransientVector) Type() ValueType { return TransientVectorType }
+func (t *TransientVector) Unbox() any      { return t }
 func (t *TransientVector) String() string {
 	return fmt.Sprintf("<transient-vector count=%d>", len(t.array))
 }
@@ -307,11 +307,11 @@ func (t *TransientVector) RawCount() int { return len(t.array) }
 
 type theTransientMapType struct{}
 
-func (t *theTransientMapType) String() string     { return t.Name() }
-func (t *theTransientMapType) Type() ValueType    { return TypeType }
-func (t *theTransientMapType) Unbox() interface{} { return nil }
-func (t *theTransientMapType) Name() string       { return "let-go.lang.TransientMap" }
-func (t *theTransientMapType) Box(bare interface{}) (Value, error) {
+func (t *theTransientMapType) String() string  { return t.Name() }
+func (t *theTransientMapType) Type() ValueType { return TypeType }
+func (t *theTransientMapType) Unbox() any      { return nil }
+func (t *theTransientMapType) Name() string    { return "let-go.lang.TransientMap" }
+func (t *theTransientMapType) Box(bare any) (Value, error) {
 	return NIL, NewTypeError(bare, "can't be boxed as", t)
 }
 
@@ -319,11 +319,11 @@ var TransientMapType *theTransientMapType = &theTransientMapType{}
 
 type theTransientVectorType struct{}
 
-func (t *theTransientVectorType) String() string     { return t.Name() }
-func (t *theTransientVectorType) Type() ValueType    { return TypeType }
-func (t *theTransientVectorType) Unbox() interface{} { return nil }
-func (t *theTransientVectorType) Name() string       { return "let-go.lang.TransientVector" }
-func (t *theTransientVectorType) Box(bare interface{}) (Value, error) {
+func (t *theTransientVectorType) String() string  { return t.Name() }
+func (t *theTransientVectorType) Type() ValueType { return TypeType }
+func (t *theTransientVectorType) Unbox() any      { return nil }
+func (t *theTransientVectorType) Name() string    { return "let-go.lang.TransientVector" }
+func (t *theTransientVectorType) Box(bare any) (Value, error) {
 	return NIL, NewTypeError(bare, "can't be boxed as", t)
 }
 
@@ -356,8 +356,8 @@ func (t *TransientSet) ensureEditable() error {
 	return nil
 }
 
-func (t *TransientSet) Type() ValueType    { return TransientSetType }
-func (t *TransientSet) Unbox() interface{} { return t }
+func (t *TransientSet) Type() ValueType { return TransientSetType }
+func (t *TransientSet) Unbox() any      { return t }
 func (t *TransientSet) String() string {
 	return fmt.Sprintf("<transient-set count=%d>", t.tm.count)
 }
@@ -418,11 +418,11 @@ func (t *TransientSet) RawCount() int { return t.tm.count }
 
 type theTransientSetType struct{}
 
-func (t *theTransientSetType) String() string     { return t.Name() }
-func (t *theTransientSetType) Type() ValueType    { return TypeType }
-func (t *theTransientSetType) Unbox() interface{} { return nil }
-func (t *theTransientSetType) Name() string       { return "let-go.lang.TransientSet" }
-func (t *theTransientSetType) Box(bare interface{}) (Value, error) {
+func (t *theTransientSetType) String() string  { return t.Name() }
+func (t *theTransientSetType) Type() ValueType { return TypeType }
+func (t *theTransientSetType) Unbox() any      { return nil }
+func (t *theTransientSetType) Name() string    { return "let-go.lang.TransientSet" }
+func (t *theTransientSetType) Box(bare any) (Value, error) {
 	return NIL, NewTypeError(bare, "can't be boxed as", t)
 }
 

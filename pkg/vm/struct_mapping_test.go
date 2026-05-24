@@ -259,7 +259,7 @@ type TestWithSlice struct {
 // short-circuits empty inputs to EmptyList.
 func TestUnboxSliceInto_EmptyList(t *testing.T) {
 	// Direct test of the helper using EmptyList as input.
-	target := reflect.New(reflect.TypeOf([]string{})).Elem()
+	target := reflect.New(reflect.TypeFor[[]string]()).Elem()
 	err := unboxSliceInto(target, EmptyList)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, target.Len(), "EmptyList must produce empty slice, not 1-element nil-filled slice")

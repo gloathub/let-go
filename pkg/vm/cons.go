@@ -32,8 +32,8 @@ func (c *Cons) String() string {
 	return b.String()
 }
 
-func (c *Cons) Type() ValueType    { return ListType }
-func (c *Cons) Unbox() interface{} { return c }
+func (c *Cons) Type() ValueType { return ListType }
+func (c *Cons) Unbox() any      { return c }
 
 func (c *Cons) First() Value {
 	return c.first

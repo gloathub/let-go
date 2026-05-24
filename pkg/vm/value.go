@@ -14,14 +14,14 @@ import (
 type ValueType interface {
 	Value
 	Name() string
-	Box(interface{}) (Value, error)
+	Box(any) (Value, error)
 }
 
 // Value is implemented by all LETGO values
 type Value interface {
 	fmt.Stringer
 	Type() ValueType
-	Unbox() interface{}
+	Unbox() any
 }
 
 // IMeta is implemented by values that support metadata.
@@ -100,12 +100,12 @@ type theTypeType struct{}
 
 var TypeType *theTypeType = &theTypeType{}
 
-func (t *theTypeType) String() string     { return t.Name() }
-func (t *theTypeType) Type() ValueType    { return t }
-func (t *theTypeType) Unbox() interface{} { return reflect.TypeOf(t) }
+func (t *theTypeType) String() string  { return t.Name() }
+func (t *theTypeType) Type() ValueType { return t }
+func (t *theTypeType) Unbox() any      { return reflect.TypeFor[*theTypeType]() }
 
 func (t *theTypeType) Name() string { return "let-go.lang.Type" }
-func (t *theTypeType) Box(b interface{}) (Value, error) {
+func (t *theTypeType) Box(b any) (Value, error) {
 	return NIL, NewTypeError(b, "can't be boxed as", t)
 }
 
@@ -113,15 +113,15 @@ type theAnyType struct{}
 
 var AnyType *theAnyType = &theAnyType{}
 
-func (t *theAnyType) String() string     { return t.Name() }
-func (t *theAnyType) Type() ValueType    { return TypeType }
-func (t *theAnyType) Unbox() interface{} { return reflect.TypeOf(t) }
-func (t *theAnyType) Name() string       { return "java.lang.Object" }
-func (t *theAnyType) Box(b interface{}) (Value, error) {
+func (t *theAnyType) String() string  { return t.Name() }
+func (t *theAnyType) Type() ValueType { return TypeType }
+func (t *theAnyType) Unbox() any      { return reflect.TypeFor[*theAnyType]() }
+func (t *theAnyType) Name() string    { return "java.lang.Object" }
+func (t *theAnyType) Box(b any) (Value, error) {
 	return NIL, NewTypeError(b, "can't be boxed as", t)
 }
 
-func ToLetGo(v interface{}) (Value, error) {
+func ToLetGo(v any) (Value, error) {
 	return BoxValue(reflect.ValueOf(v))
 }
 
@@ -156,7 +156,7 @@ func BoxValue(v reflect.Value) (Value, error) {
 			return NewBoxed(v.Interface()), nil
 		}
 		return NIL, NewTypeError(v, "is not boxable", nil)
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if v.IsNil() {
 			return NIL, nil
 		}
@@ -231,5 +231,5 @@ func BoxValue(v reflect.Value) (Value, error) {
 }
 
 func IsTruthy(v Value) bool {
-	return !(v == NIL || v == FALSE)
+	return v != NIL && v != FALSE
 }

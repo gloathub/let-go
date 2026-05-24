@@ -1004,7 +1004,7 @@ func recurCompiler(c *Context, form vm.Value) error {
 		ignore := 0
 		if passedScopes > 0 {
 			passedLocals := 0
-			for i := 0; i < passedScopes; i++ {
+			for i := range passedScopes {
 				// Use the per-scope slot count rather than len(map): a scope
 				// with shadowed names has more live stack slots than distinct
 				// symbols, and OP_RECUR must drop all of them.

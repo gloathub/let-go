@@ -120,10 +120,7 @@ func writeSnippet(b *strings.Builder, info *SourceInfo) {
 	fmt.Fprintf(b, " "+ansiBoldBlue+"%d"+ansiReset+" "+ansiBoldBlue+"|"+ansiReset+" %s\n", lineNum, line)
 
 	// Position indicator
-	col := info.Column
-	if col < 0 {
-		col = 0
-	}
+	col := max(info.Column, 0)
 	pointer := strings.Repeat(" ", col) + ansiBoldRed + "^^^" + ansiReset
 	fmt.Fprintf(b, " %s "+ansiBoldBlue+"|"+ansiReset+" %s\n", padding, pointer)
 }

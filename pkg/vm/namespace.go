@@ -14,12 +14,12 @@ import (
 
 type theNamespaceType struct{}
 
-func (t *theNamespaceType) String() string     { return t.Name() }
-func (t *theNamespaceType) Type() ValueType    { return TypeType }
-func (t *theNamespaceType) Unbox() interface{} { return reflect.TypeOf(t) }
+func (t *theNamespaceType) String() string  { return t.Name() }
+func (t *theNamespaceType) Type() ValueType { return TypeType }
+func (t *theNamespaceType) Unbox() any      { return reflect.TypeFor[*theNamespaceType]() }
 
 func (t *theNamespaceType) Name() string { return "let-go.lang.Namespace" }
-func (t *theNamespaceType) Box(fn interface{}) (Value, error) {
+func (t *theNamespaceType) Box(fn any) (Value, error) {
 	return NIL, NewTypeError(fn, "can't be boxed as", t)
 }
 
@@ -72,7 +72,7 @@ func (n *Namespace) IsExcluded(name Symbol) bool {
 func (n *Namespace) Type() ValueType { return NamespaceType }
 
 // Unbox implements Unbox
-func (n *Namespace) Unbox() interface{} {
+func (n *Namespace) Unbox() any {
 	return nil
 }
 

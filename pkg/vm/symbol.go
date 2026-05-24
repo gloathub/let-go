@@ -15,16 +15,16 @@ type theSymbolType struct {
 	zero Symbol
 }
 
-func (t *theSymbolType) String() string     { return t.Name() }
-func (t *theSymbolType) Type() ValueType    { return TypeType }
-func (t *theSymbolType) Unbox() interface{} { return reflect.TypeOf(t) }
+func (t *theSymbolType) String() string  { return t.Name() }
+func (t *theSymbolType) Type() ValueType { return TypeType }
+func (t *theSymbolType) Unbox() any      { return reflect.TypeFor[*theSymbolType]() }
 
-func (lt *theSymbolType) Name() string { return "let-go.lang.Symbol" }
+func (t *theSymbolType) Name() string { return "let-go.lang.Symbol" }
 
-func (lt *theSymbolType) Box(bare interface{}) (Value, error) {
+func (t *theSymbolType) Box(bare any) (Value, error) {
 	raw, ok := bare.(fmt.Stringer)
 	if !ok {
-		return BooleanType.zero, NewTypeError(bare, "can't be boxed as", lt)
+		return BooleanType.zero, NewTypeError(bare, "can't be boxed as", t)
 	}
 	return Symbol(raw.String()), nil
 }
@@ -42,7 +42,7 @@ func (l Symbol) Hash() uint32 { return hashUnencodedChars(string(l)) }
 func (l Symbol) Type() ValueType { return SymbolType }
 
 // Unbox implements Unbox
-func (l Symbol) Unbox() interface{} {
+func (l Symbol) Unbox() any {
 	return string(l)
 }
 
