@@ -156,7 +156,8 @@ build of let-go.
 ### Homebrew (macOS / Linux)
 
 ```bash
-brew install nooga/let-go/let-go
+brew tap nooga/let-go https://github.com/nooga/let-go
+brew install let-go
 ```
 
 ### Download
@@ -169,9 +170,6 @@ Prebuilt binaries for Linux, macOS, and Plan 9 in
 ```bash
 go install github.com/nooga/let-go@latest
 ```
-
-This installs the command as `let-go`. Homebrew and release archives install
-the same CLI as `lg`.
 
 ### Usage
 

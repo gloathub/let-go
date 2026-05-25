@@ -1023,40 +1023,56 @@ func recurCompiler(c *Context, form vm.Value) error {
 	return nil
 }
 
+// parseBindingsVector extracts binding forms from a vector.
+func parseBindingsVector(val vm.Value) ([]vm.Value, error) {
+	switch bv := val.(type) {
+	case vm.ArrayVector:
+		return []vm.Value(bv), nil
+	case vm.PersistentVector:
+		return bv.Unbox().([]vm.Value), nil
+	default:
+		return nil, fmt.Errorf("bindings should be a vector, got %T: %v", val, val)
+	}
+}
+
+// compileBindings validates and compiles let/loop bindings sequentially.
+func compileBindings(c *Context, binds []vm.Value, opName string) (int, error) {
+	bindn := 0
+	for i := 0; i < len(binds); i += 2 {
+		name := binds[i]
+		if name.Type() != vm.SymbolType {
+			return 0, NewCompileError(fmt.Sprintf("%s binding name must be a symbol: %v", opName, name))
+		}
+		if i+1 >= len(binds) {
+			return 0, NewCompileError(fmt.Sprintf("%s bindings must have even number of forms", opName))
+		}
+		value := binds[i+1]
+		err := c.compileForm(value)
+		if err != nil {
+			return 0, NewCompileError(fmt.Sprintf("compiling %s binding", opName)).Wrap(err)
+		}
+		c.addLocal(name.(vm.Symbol))
+		bindn++
+	}
+	return bindn, nil
+}
+
 func loopCompiler(c *Context, form vm.Value) error {
 	bindings := form.(*vm.List).Next()
 	if bindings == nil {
 		return NewCompileError("loop requires bindings")
 	}
-	var binds []vm.Value
-	switch bv := bindings.First().(type) {
-	case vm.ArrayVector:
-		binds = []vm.Value(bv)
-	case vm.PersistentVector:
-		binds = bv.Unbox().([]vm.Value)
-	default:
-		return NewCompileError("loop bindings should be a vector")
+	binds, err := parseBindingsVector(bindings.First())
+	if err != nil {
+		return NewCompileError("loop bindings should be a vector").Wrap(err)
 	}
 	body := bindings.Next()
 	c.pushLocals()
 	tp := c.tailPosition
 	c.tailPosition = false
-	bindn := 0
-	for i := 0; i < len(binds); i += 2 {
-		name := binds[i]
-		if name.Type() != vm.SymbolType {
-			return NewCompileError("loop binding name must be a symbol")
-		}
-		if i+1 >= len(binds) {
-			return NewCompileError("loop bindings must have even number of forms")
-		}
-		value := binds[i+1]
-		err := c.compileForm(value)
-		if err != nil {
-			return NewCompileError("compiling loop binding").Wrap(err)
-		}
-		c.addLocal(name.(vm.Symbol))
-		bindn++
+	bindn, err := compileBindings(c, binds, "loop")
+	if err != nil {
+		return err
 	}
 	c.pushRecurPoint(bindn)
 	if body == nil || body == vm.EmptyList {
@@ -1092,35 +1108,17 @@ func letCompiler(c *Context, form vm.Value) error {
 	if bindings == nil {
 		return NewCompileError("let requires bindings")
 	}
-	var binds []vm.Value
-	switch bv := bindings.First().(type) {
-	case vm.ArrayVector:
-		binds = []vm.Value(bv)
-	case vm.PersistentVector:
-		binds = bv.Unbox().([]vm.Value)
-	default:
-		return NewCompileError(fmt.Sprintf("let bindings should be a vector, got %T: %v", bindings.First(), bindings.First()))
+	binds, err := parseBindingsVector(bindings.First())
+	if err != nil {
+		return NewCompileError("let bindings should be a vector").Wrap(err)
 	}
 	body := bindings.Next()
 	c.pushLocals()
 	tc := c.tailPosition
 	c.tailPosition = false
-	bindn := 0
-	for i := 0; i < len(binds); i += 2 {
-		name := binds[i]
-		if name.Type() != vm.SymbolType {
-			return NewCompileError("let binding name must be a symbol: " + name.String())
-		}
-		if i+1 >= len(binds) {
-			return NewCompileError("let bindings must have even number of forms")
-		}
-		value := binds[i+1]
-		err := c.compileForm(value)
-		if err != nil {
-			return NewCompileError("compiling let binding").Wrap(err)
-		}
-		c.addLocal(name.(vm.Symbol))
-		bindn++
+	bindn, err := compileBindings(c, binds, "let")
+	if err != nil {
+		return err
 	}
 	if body == nil || body == vm.EmptyList {
 		c.emitWithArg(vm.OP_LOAD_CONST, c.constant(vm.NIL))
@@ -1239,21 +1237,27 @@ func fnCompiler(c *Context, form vm.Value) error {
 	return nil
 }
 
+// listArgs extracts argument values from a list form's body.
+func listArgs(form vm.Value) []vm.Value {
+	nxt := form.(*vm.List).Next()
+	if nxt == nil {
+		return nil
+	}
+	if nl, ok := nxt.(*vm.List); ok {
+		return nl.Unbox().([]vm.Value)
+	}
+	var args []vm.Value
+	for s := nxt; s != nil; s = s.Next() {
+		args = append(args, s.First())
+	}
+	return args
+}
+
 func ifCompiler(c *Context, form vm.Value) error {
 	tc := c.tailPosition
 	//c.tailPosition = tc
 
-	nxt := form.(*vm.List).Next()
-	var args []vm.Value
-	if nxt != nil {
-		if nl, ok := nxt.(*vm.List); ok {
-			args = nl.Unbox().([]vm.Value)
-		} else {
-			for s := nxt; s != nil; s = s.Next() {
-				args = append(args, s.First())
-			}
-		}
-	}
+	args := listArgs(form)
 	l := len(args)
 	if l < 2 || l > 3 {
 		return NewCompileError(fmt.Sprintf("if: wrong number of forms (%d), need 2 or 3", l))
@@ -1293,18 +1297,237 @@ func ifCompiler(c *Context, form vm.Value) error {
 	return nil
 }
 
-func doCompiler(c *Context, form vm.Value) error {
-	nxt := form.(*vm.List).Next()
-	var args []vm.Value
-	if nxt != nil {
-		if nl, ok := nxt.(*vm.List); ok {
-			args = nl.Unbox().([]vm.Value)
-		} else {
-			for s := nxt; s != nil; s = s.Next() {
-				args = append(args, s.First())
-			}
+// tryDetectInNS detects top-level (in-ns 'foo) and updates the compiler namespace early.
+// Use LookupOrRegisterNSNoLoad rather than rt.NS so we don't trigger the resolver to load 'foo from disk.
+func tryDetectInNS(c *Context, arg vm.Value) {
+	if arg.Type() != vm.ListType {
+		return
+	}
+	lst := arg.(vm.Seq)
+	first := lst.First()
+	if first == nil || first.Type() != vm.SymbolType || vm.Symbol(first.(vm.Symbol)) != vm.Symbol("in-ns") {
+		return
+	}
+	alist := lst.Next()
+	if alist == nil {
+		return
+	}
+	q := alist.First()
+	if q == nil || q.Type() != vm.ListType {
+		return
+	}
+	qq := q.(vm.Seq)
+	if qq.First() != vm.Symbol("quote") {
+		return
+	}
+	qqN := qq.Next()
+	if qqN == nil {
+		return
+	}
+	namev := qqN.First()
+	if namev == nil || namev.Type() != vm.SymbolType {
+		return
+	}
+	ns := rt.LookupOrRegisterNSNoLoad(string(namev.(vm.Symbol)))
+	if ns == nil {
+		return
+	}
+	c.SetCurrentNS(ns)
+}
+
+// trySimulateAlias handles core/alias compile-time simulation.
+func trySimulateAlias(c *Context, lst vm.Seq) error {
+	asArgs := lst.Next()
+	if asArgs == nil {
+		return nil
+	}
+	qa := asArgs.First()
+	asArgs = asArgs.Next()
+	if asArgs == nil {
+		return nil
+	}
+	qb := asArgs.First()
+	if qa == nil || qb == nil || qa.Type() != vm.ListType || qb.Type() != vm.ListType {
+		return nil
+	}
+	qqa := qa.(vm.Seq)
+	qqb := qb.(vm.Seq)
+	if qqa.First() != vm.Symbol("quote") || qqb.First() != vm.Symbol("quote") {
+		return nil
+	}
+	qqaN := qqa.Next()
+	qqbN := qqb.Next()
+	if qqaN == nil || qqbN == nil {
+		return nil
+	}
+	alias, okAlias := qqaN.First().(vm.Symbol)
+	nsname, okNS := qqbN.First().(vm.Symbol)
+	if !okAlias || !okNS {
+		return nil
+	}
+	target, err := rt.RequireNS(string(nsname))
+	if err != nil {
+		return c.compileError(err.Error())
+	}
+	c.CurrentNS().Alias(alias, target)
+	return nil
+}
+
+// trySimulateRefer handles core/refer compile-time simulation.
+func trySimulateRefer(c *Context, lst vm.Seq) error {
+	rArgs := lst.Next()
+	if rArgs == nil {
+		return nil
+	}
+	nsQ := rArgs.First()
+	rArgs = rArgs.Next()
+	aliasStr := ""
+	all := true
+	if rArgs != nil {
+		if s, ok := rArgs.First().(vm.String); ok {
+			aliasStr = string(s)
+		}
+		rArgs = rArgs.Next()
+	}
+	if rArgs != nil {
+		if b, ok := rArgs.First().(vm.Boolean); ok {
+			all = bool(b)
 		}
 	}
+	if nsQ == nil || nsQ.Type() != vm.ListType {
+		return nil
+	}
+	qq := nsQ.(vm.Seq)
+	if qq.First() != vm.Symbol("quote") {
+		return nil
+	}
+	qqN := qq.Next()
+	if qqN == nil {
+		return nil
+	}
+	nsname, ok := qqN.First().(vm.Symbol)
+	if !ok {
+		return nil
+	}
+	target, err := rt.RequireNS(string(nsname))
+	if err != nil {
+		return c.compileError(err.Error())
+	}
+	c.CurrentNS().Refer(target, aliasStr, all)
+	return nil
+}
+
+// trySimulateImportVar handles core/import-var compile-time simulation.
+func trySimulateImportVar(c *Context, lst vm.Seq) error {
+	ivArgs := lst.Next()
+	if ivArgs == nil {
+		return nil
+	}
+	qn := ivArgs.First()
+	ivArgs = ivArgs.Next()
+	if ivArgs == nil {
+		return nil
+	}
+	qfrom := ivArgs.First()
+	ivArgs = ivArgs.Next()
+	if ivArgs == nil {
+		return nil
+	}
+	qto := ivArgs.First()
+
+	if qn == nil || qfrom == nil || qto == nil {
+		return nil
+	}
+	if qn.Type() != vm.ListType || qfrom.Type() != vm.ListType || qto.Type() != vm.ListType {
+		return nil
+	}
+	qnn := qn.(vm.Seq)
+	qff := qfrom.(vm.Seq)
+	qtt := qto.(vm.Seq)
+	if qnn.First() != vm.Symbol("quote") || qff.First() != vm.Symbol("quote") || qtt.First() != vm.Symbol("quote") {
+		return nil
+	}
+	qnnN := qnn.Next()
+	qffN := qff.Next()
+	qttN := qtt.Next()
+	if qnnN == nil || qffN == nil || qttN == nil {
+		return nil
+	}
+	nsname, okNS := qnnN.First().(vm.Symbol)
+	from, okFrom := qffN.First().(vm.Symbol)
+	to, okTo := qttN.First().(vm.Symbol)
+	if !okNS || !okFrom || !okTo {
+		return nil
+	}
+	fromNs, err := rt.RequireNS(string(nsname))
+	if err != nil {
+		return c.compileError(err.Error())
+	}
+	c.CurrentNS().ImportVar(fromNs, from, to)
+	return nil
+}
+
+// trySimulateUse handles (use 'ns) compile-time simulation.
+func trySimulateUse(c *Context, lst vm.Seq) error {
+	uArgs := lst.Next()
+	for uArgs != nil {
+		qa := uArgs.First()
+		if qa == nil || qa.Type() != vm.ListType {
+			uArgs = uArgs.Next()
+			continue
+		}
+		qq := qa.(vm.Seq)
+		if qq.First() != vm.Symbol("quote") {
+			uArgs = uArgs.Next()
+			continue
+		}
+		qqN := qq.Next()
+		if qqN == nil {
+			uArgs = uArgs.Next()
+			continue
+		}
+		nsname, ok := qqN.First().(vm.Symbol)
+		if !ok {
+			uArgs = uArgs.Next()
+			continue
+		}
+		target, err := rt.RequireNS(string(nsname))
+		if err != nil {
+			return c.compileError(err.Error())
+		}
+		c.CurrentNS().Refer(target, "", true)
+		uArgs = uArgs.Next()
+	}
+	return nil
+}
+
+// trySimulateNsHelper delegates simulation to helper functions for namespace operations.
+func trySimulateNsHelper(c *Context, arg vm.Value) error {
+	if arg.Type() != vm.ListType {
+		return nil
+	}
+	lst := arg.(vm.Seq)
+	first := lst.First()
+	if first == nil || first.Type() != vm.SymbolType {
+		return nil
+	}
+	fname := vm.Symbol(first.(vm.Symbol))
+
+	switch fname {
+	case vm.Symbol("core/alias"):
+		return trySimulateAlias(c, lst)
+	case vm.Symbol("core/refer"):
+		return trySimulateRefer(c, lst)
+	case vm.Symbol("core/import-var"):
+		return trySimulateImportVar(c, lst)
+	case vm.Symbol("use"):
+		return trySimulateUse(c, lst)
+	}
+	return nil
+}
+
+func doCompiler(c *Context, form vm.Value) error {
+	args := listArgs(form)
 	l := len(args)
 	tc := c.tailPosition
 	c.tailPosition = false
@@ -1315,160 +1538,18 @@ func doCompiler(c *Context, form vm.Value) error {
 		return nil
 	}
 	for i := range args {
-		// Detect top-level (in-ns 'foo) and update compiler namespace early.
-		// Use LookupOrRegisterNSNoLoad rather than rt.NS so we don't trigger
-		// the resolver to load 'foo from disk: if the file we're currently
-		// compiling declares (ns foo ...), and a candidate path for ns 'foo
-		// matches our file, rt.NS would re-load and re-execute that file
-		// inside our compile — the body runs twice.
-		//
-		// The (in-ns) runtime fn itself uses LookupOrRegisterNSNoLoad for
-		// the same reason. This fix aligns the compile-time early
-		// detection with the runtime semantics.
-		if i == 0 && args[i].Type() == vm.ListType {
-			lst := args[i].(vm.Seq)
-			if lst.First().Type() == vm.SymbolType && vm.Symbol(lst.First().(vm.Symbol)) == vm.Symbol("in-ns") {
-				alist := lst.Next()
-				if alist != nil {
-					q := alist.First()
-					if q.Type() == vm.ListType {
-						qq := q.(vm.Seq)
-						if qq.First() == vm.Symbol("quote") {
-							qqN := qq.Next()
-							if qqN != nil {
-								namev := qqN.First()
-								if namev.Type() == vm.SymbolType {
-									if ns := rt.LookupOrRegisterNSNoLoad(string(namev.(vm.Symbol))); ns != nil {
-										c.SetCurrentNS(ns)
-									}
-								}
-							}
-						}
-					}
-				}
-			}
+		if i == 0 {
+			tryDetectInNS(c, args[i])
 		}
 		// Simulate ns helpers at compile-time so later forms in the same do can resolve
-		if args[i].Type() == vm.ListType {
-			lst := args[i].(vm.Seq)
-			if lst.First().Type() == vm.SymbolType {
-				fname := vm.Symbol(lst.First().(vm.Symbol))
-				// core/alias
-				if fname == vm.Symbol("core/alias") {
-					asArgs := lst.Next()
-					if asArgs != nil {
-						qa := asArgs.First()
-						asArgs = asArgs.Next()
-						if asArgs != nil {
-							qb := asArgs.First()
-							if qa.Type() == vm.ListType && qb.Type() == vm.ListType {
-								qqa := qa.(vm.Seq)
-								qqb := qb.(vm.Seq)
-								if qqa.First() == vm.Symbol("quote") && qqb.First() == vm.Symbol("quote") {
-									qqaN := qqa.Next()
-									qqbN := qqb.Next()
-									if qqaN != nil && qqbN != nil {
-										alias := qqaN.First().(vm.Symbol)
-										nsname := qqbN.First().(vm.Symbol)
-										if target := rt.NS(string(nsname)); target != nil {
-											c.CurrentNS().Alias(alias, target)
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-				// core/refer (ns, alias, all)
-				if fname == vm.Symbol("core/refer") {
-					rArgs := lst.Next()
-					if rArgs != nil {
-						nsQ := rArgs.First()
-						rArgs = rArgs.Next()
-						aliasStr := ""
-						all := true
-						if rArgs != nil {
-							if s, ok := rArgs.First().(vm.String); ok {
-								aliasStr = string(s)
-							}
-							rArgs = rArgs.Next()
-						}
-						if rArgs != nil {
-							if b, ok := rArgs.First().(vm.Boolean); ok {
-								all = bool(b)
-							}
-						}
-						if nsQ.Type() == vm.ListType {
-							qq := nsQ.(vm.Seq)
-							if qq.First() == vm.Symbol("quote") {
-								qqN := qq.Next()
-								if qqN != nil {
-									nsname := qqN.First().(vm.Symbol)
-									if target := rt.NS(string(nsname)); target != nil {
-										c.CurrentNS().Refer(target, aliasStr, all)
-									}
-								}
-							}
-						}
-					}
-				}
-				// core/import-var (from-ns, from, to)
-				if fname == vm.Symbol("core/import-var") {
-					ivArgs := lst.Next()
-					if ivArgs != nil {
-						qn := ivArgs.First()
-						ivArgs = ivArgs.Next()
-						if ivArgs != nil {
-							qfrom := ivArgs.First()
-							ivArgs = ivArgs.Next()
-							if ivArgs != nil {
-								qto := ivArgs.First()
-								if qn.Type() == vm.ListType && qfrom.Type() == vm.ListType && qto.Type() == vm.ListType {
-									qnn := qn.(vm.Seq)
-									qff := qfrom.(vm.Seq)
-									qtt := qto.(vm.Seq)
-									qnnN := qnn.Next()
-									qffN := qff.Next()
-									qttN := qtt.Next()
-									if qnnN != nil && qffN != nil && qttN != nil && qnn.First() == vm.Symbol("quote") && qff.First() == vm.Symbol("quote") && qtt.First() == vm.Symbol("quote") {
-										fromNs := rt.NS(string(qnnN.First().(vm.Symbol)))
-										from := qffN.First().(vm.Symbol)
-										to := qttN.First().(vm.Symbol)
-										if fromNs != nil {
-											c.CurrentNS().ImportVar(fromNs, from, to)
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-				// (use 'ns) — load namespace and refer all at compile time
-				if fname == vm.Symbol("use") {
-					uArgs := lst.Next()
-					for uArgs != nil {
-						qa := uArgs.First()
-						if qa.Type() == vm.ListType {
-							qq := qa.(vm.Seq)
-							if qq.First() == vm.Symbol("quote") {
-								qqN := qq.Next()
-								if qqN != nil {
-									nsname := qqN.First().(vm.Symbol)
-									if target := rt.NS(string(nsname)); target != nil {
-										c.CurrentNS().Refer(target, "", true)
-									}
-								}
-							}
-						}
-						uArgs = uArgs.Next()
-					}
-				}
-			}
+		err := trySimulateNsHelper(c, args[i])
+		if err != nil {
+			return err
 		}
 		if tc && i == l-1 {
 			c.tailPosition = true
 		}
-		err := c.compileForm(args[i])
+		err = c.compileForm(args[i])
 		if err != nil {
 			return NewCompileError("compiling do member").Wrap(err)
 		}
@@ -1484,17 +1565,7 @@ func doCompiler(c *Context, form vm.Value) error {
 func defCompiler(c *Context, form vm.Value) error {
 	tc := c.tailPosition
 	c.tailPosition = false
-	nxt := form.(*vm.List).Next()
-	var args []vm.Value
-	if nxt != nil {
-		if nl, ok := nxt.(*vm.List); ok {
-			args = nl.Unbox().([]vm.Value)
-		} else {
-			for s := nxt; s != nil; s = s.Next() {
-				args = append(args, s.First())
-			}
-		}
-	}
+	args := listArgs(form)
 	l := len(args)
 	if l < 1 || l > 3 {
 		return NewCompileError(fmt.Sprintf("def: wrong number of forms (%d), need 1, 2 or 3", l))
@@ -1562,17 +1633,7 @@ func defCompiler(c *Context, form vm.Value) error {
 func setBangCompiler(c *Context, form vm.Value) error {
 	tc := c.tailPosition
 	c.tailPosition = false
-	nxt := form.(*vm.List).Next()
-	var args []vm.Value
-	if nxt != nil {
-		if nl, ok := nxt.(*vm.List); ok {
-			args = nl.Unbox().([]vm.Value)
-		} else {
-			for s := nxt; s != nil; s = s.Next() {
-				args = append(args, s.First())
-			}
-		}
-	}
+	args := listArgs(form)
 	l := len(args)
 	if l != 2 {
 		return NewCompileError(fmt.Sprintf("set!: wrong number of forms (%d), need 2", l))

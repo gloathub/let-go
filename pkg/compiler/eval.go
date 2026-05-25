@@ -118,6 +118,15 @@ func loadPrecompiledBundle() error {
 		}
 	}
 
+	// Source-only namespaces (precompiled bundle deliberately skips them
+	// because their precompiled stubs would intern nil into dependent
+	// namespaces — see cmd/lgbgen/main.go). Their vars may already exist
+	// as stubs in the registry from bundle decoding's VarRef pass; mark
+	// them NeedsLoad so (require 'name) re-loads from source.
+	for _, name := range []string{"ir.data"} {
+		rt.MarkNSNeedsLoad(name)
+	}
+
 	return nil
 }
 

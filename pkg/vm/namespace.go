@@ -198,6 +198,16 @@ func (n *Namespace) Lookup(symbol Symbol) Value {
 	// Alias-qualified resolution via aliases
 	if target, ok := n.aliases[sns.(Symbol)]; ok {
 		v := target.registry[sym.(Symbol)]
+		if v == nil && nsLookup != nil {
+			// Alias may point to a placeholder namespace created before source
+			// load completed. Re-resolve by name so runtime loader can
+			// materialize the namespace on demand, then retry the symbol lookup.
+			if loaded := nsLookup(target.Name()); loaded != nil {
+				target = loaded
+				n.aliases[sns.(Symbol)] = loaded
+				v = target.registry[sym.(Symbol)]
+			}
+		}
 		if v == nil || v.isPrivate {
 			return NIL
 		}

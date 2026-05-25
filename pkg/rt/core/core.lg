@@ -259,6 +259,24 @@
       (persistent! (reduce conj! (transient a) b))
       (reduce conj a b))))
 
+(defn reduce-kv [f init coll]
+  (cond
+    (map? coll)
+      (reduce (fn [acc pair] (f acc (first pair) (second pair))) init coll)
+    ;; Vectors: both ArrayVector (literal []) and PersistentVector (large
+    ;; vectors built incrementally) need integer-keyed iteration. Test via
+    ;; counted+nth contract rather than exact type, since IR insts grow
+    ;; large enough to migrate from ArrayVector to PersistentVector.
+    (or (vector? coll)
+        (= "let-go.lang.PersistentVector" (str (type coll))))
+      (let [n (count coll)]
+        (loop [i 0 acc init]
+          (if (>= i n)
+            acc
+            (recur (inc i) (f acc i (nth coll i))))))
+    (nil? coll) init
+    :else (throw (str "reduce-kv: unsupported coll type: " (type coll)))))
+
 (defmacro time [& body]
   (let [then   (gensym "time__")
         val    (gensym)
@@ -715,9 +733,41 @@
       nil ;; throw here
       )))
 
+;; *ir-compile* — when truthy, defn routes each fn body through the
+;; Lisp-side IR pipeline (ir.passes.pipeline/compile-form) instead of
+;; the standard Go compile path. Set this BEFORE the (defn ...) forms
+;; you want IR-compiled. The IR pipeline namespace must already be
+;; loaded (require ir.passes.pipeline) when defn fires.
+;;
+;; Only single-arity defns (with or without variadic &) take the IR
+;; path. Multi-arity and docstring-less edge cases fall back to the
+;; standard expansion. Used for stress-testing the IR pipeline against
+;; real codebases like xsofy without committing to a full toolchain
+;; switch.
+(def ^:dynamic *ir-compile* false)
+
 (defmacro defn [name & forms]
-  (let [forms (if (string? (first forms)) (next forms) forms)]
-    `(def ~name (fn ~@forms))))
+  (let [forms     (if (string? (first forms)) (next forms) forms)
+        first-form (first forms)
+        single?    (vector? first-form)
+        args       (when single? first-form)
+        variadic?  (when single? (boolean (some (fn [a] (= a '&)) args)))
+        arity      (when single?
+                     (if variadic?
+                       (- (count args) 2)   ; & and the rest-sym don't count
+                       (count args)))]
+    (if (and *ir-compile* single?)
+      ;; `resolve` defers ir.passes.pipeline lookup to RUNTIME — core.lg
+      ;; compiles before ir.passes.pipeline exists, so a direct symbol
+      ;; reference would fail at bundle-gen time.
+      (let [whole-form (apply list 'defn name forms)
+            cf-var     (resolve 'ir.passes.pipeline/compile-form)
+            _          (when (nil? cf-var)
+                         (throw "*ir-compile* is true but ir.passes.pipeline isn't loaded; (require 'ir.passes.pipeline) first"))
+            chunk      (cf-var whole-form (deref #'*ns*))
+            fn-val     (chunk->fn arity variadic? chunk)]
+        (list 'def name fn-val))
+      `(def ~name (fn ~@forms)))))
 
 (defmacro while [test & body]
   `(loop* [] (when ~test ~@body (recur))))
