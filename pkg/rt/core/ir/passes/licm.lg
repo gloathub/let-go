@@ -145,18 +145,13 @@
        vec))
 
 (defn thread-hoisted-through-header! [f loop-info hoisted-pairs]
-  "For each hoisted value used inside the loop body, add a header
-   BlockArg, rewire in-loop uses to the new param, update each header
-   pred's branch-target args appropriately.
+  "For each hoisted value used inside the loop body, add a block-arg parameter
+   to EVERY block in the loop body. Map each block to its new parameter ID.
+   Update the branch targets of all predecessors of loop blocks to pass the
+   hoisted value. Rewire all in-loop uses to the corresponding block's parameter.
 
    loop-info = {:header BLK :body SET :preheader BLK}
-   hoisted-pairs = vector of [original-id clone-id] from hoisting
-
-   Per pred of header:
-     - if pred IS in loop body (back-edge) → pass new-param-id
-     - else (forward edge) → pass clone-id (defined in pre-header)
-
-   Algorithm matches OLD pkg/ir/passes/licm.go threadHoistedThroughHeader."
+   hoisted-pairs = vector of [original-id clone-id] from hoisting"
   (let [{:keys [header body preheader]} loop-info
         ;; Per hoisted-pair, find body-Insts that consume the clone.
         ;; clone-id is what got installed in the pre-header; its uses
@@ -169,15 +164,17 @@
                          {:clone clone :users users-in-loop}))))
              vec)]
     (when (seq threads)
-      ;; Allocate one new header BlockArg per hoisted value that's
-      ;; consumed inside the loop. Store the mapping from clone → param.
-      (let [threads-with-params
-            (mapv (fn [t]
-                    (let [pos (count (ir/block-params header f))
-                          pid (ir/add-inst f header :block-arg [] pos)]
-                      (ir/add-block-param! f header pid)
-                      (assoc t :param pid)))
-                  threads)]
+      (doseq [{:keys [clone users]} threads]
+        ;; 1. Allocate a block-arg parameter in EVERY block of the loop body.
+        ;; Create a map of block-id -> param-id.
+        (let [block-params-map
+              (reduce (fn [m blk]
+                        (let [pos (count (ir/block-params blk f))
+                              pid (ir/add-inst f blk :block-arg [] pos)]
+                          (ir/add-block-param! f blk pid)
+                          (assoc m blk pid)))
+                      {}
+                      body)]
 
         ;; Step 1: Rewire in-loop user refs from clone → param.
         ;; If user is in the header block, refs rewrite directly to param.

@@ -1512,7 +1512,7 @@ var (
 // registers offset 1 as the start of line 2, the next registers offset 2
 // as the start of line 3, and so on. token.File.AddLine ignores
 // duplicate or out-of-order offsets, so repeated calls past the high
-// water mark remain safe.
+// water mark are safe even if a future caller decides to pre-warm.
 func allocPos() token.Pos {
 	p := token.Pos(goPosNext)
 	goSynthFile.AddLine(goPosNext)

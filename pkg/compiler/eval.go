@@ -193,6 +193,49 @@ func postCoreInit() {
 	rasVar := coreNS.LookupOrAdd(vm.Symbol("read-all-string"))
 	rasVar.(*vm.Var).SetRoot(readAllStringFn)
 
+	// read-all-string: parse every top-level form from a string,
+	// return as a vector. Useful for scripts that walk source
+	// form-by-form (dependency analysis, codegen). EOF is the only
+	// non-error stop condition; any other reader error is propagated
+	// so callers see partial-stream syntax errors instead of silent
+	// truncation.
+	readAllStringFn, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 1 {
+			return vm.NIL, fmt.Errorf("read-all-string: wrong number of arguments %d (expected 1)", len(vs))
+		}
+		s, ok := vs[0].(vm.String)
+		if !ok {
+			return vm.NIL, fmt.Errorf("read-all-string: expected String, got %T", vs[0])
+		}
+		reader := NewLispReader(strings.NewReader(string(s)), "<read-all-string>")
+		forms := []vm.Value{}
+		for {
+			// Peek: skip whitespace, then either give up cleanly (EOF
+			// at form boundary) or put the char back so Read can see
+			// the start of the next form. Distinguishes clean EOF
+			// from mid-form EOF — both surface as IsCausedBy(io.EOF)
+			// but only the former is acceptable.
+			_, err := reader.eatWhitespace()
+			if err != nil {
+				if errors.IsCausedBy(err, io.EOF) {
+					break
+				}
+				return vm.NIL, err
+			}
+			if err := reader.unread(); err != nil {
+				return vm.NIL, err
+			}
+			form, err := reader.Read()
+			if err != nil {
+				return vm.NIL, err
+			}
+			forms = append(forms, form)
+		}
+		return vm.NewPersistentVector(forms), nil
+	})
+	rasVar := coreNS.LookupOrAdd(vm.Symbol("read-all-string"))
+	rasVar.(*vm.Var).SetRoot(readAllStringFn)
+
 	// load-string: compile and evaluate a string of code, returning the last value.
 	loadStringFn, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
