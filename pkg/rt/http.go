@@ -134,11 +134,7 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, request *http.Request) {
 				es := eSeq.Seq()
 				k := es.First()
 				v := es.Next().First()
-				ks := k.String()
-				if k.Type() == vm.KeywordType {
-					ks = ks[1:]
-				}
-				head.Add(ks, v.String())
+				head.Add(rawString(k), rawString(v))
 			}
 		}
 	}
