@@ -51,6 +51,7 @@ var embeddedSources = map[string]*string{
 	"ir.build":            &rt.IRBuildSrc,
 	"ir.validate":         &rt.IRValidateSrc,
 	"ir.passes.pipeline":  &rt.IRPassPipelineSrc,
+	"ir.passes.trace":     &rt.IRPassTraceSrc,
 	"ir.dump":             &rt.IRDumpSrc,
 	"check":               &rt.CheckSrc,
 }
