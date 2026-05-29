@@ -512,11 +512,17 @@
         (some function-needs-vm? (nested-template-fns f)))))
 
 (defn- function-needs-tail-call? [f]
+  ;; Blocks with no terminator (e.g. unreachable dead blocks left by build)
+  ;; return nil from block-term; `(ir/op nil f)` would fail. Skip them.
   (loop [blocks (ir/blocks f)]
     (cond
       (empty? blocks) false
-      (= :tail-call (ir/op (ir/block-term (first blocks) f) f)) true
-      :else (recur (rest blocks)))))
+      :else
+        (let [term (ir/block-term (first blocks) f)]
+          (cond
+            (nil? term) (recur (rest blocks))
+            (= :tail-call (ir/op term f)) true
+            :else (recur (rest blocks)))))))
 
 (defn- arg-local-decls [f]
   "For tail-call fns, declare mutable locals (a0, a1, ...) that shadow the
@@ -562,10 +568,15 @@
                       decls)]
          (if (empty? blocks)
            out
-           (let [stmts (lower-block-stmts f closed-exprs (first blocks))]
-             (if (nil? stmts)
-               nil
-               (recur (rest blocks) (into out stmts))))))))))
+           (let [bid (first blocks)]
+             ;; Skip dead/unterminated blocks — build can leave them and
+             ;; lower-terminator would call (ir/op nil f), failing.
+             (if (nil? (ir/block-term bid f))
+               (recur (rest blocks) out)
+               (let [stmts (lower-block-stmts f closed-exprs bid)]
+                 (if (nil? stmts)
+                   nil
+                   (recur (rest blocks) (into out stmts))))))))))))
 
 (defn- params-for [f]
   (let [arity       (ir/fn-arity f)
@@ -586,14 +597,17 @@
   (loop [blocks (ir/blocks f) out []]
     (if (empty? blocks)
       out
-      (let [term (ir/block-term (first blocks) f)
-            op   (ir/op term f)
-            refs (ir/refs term f)]
+      (let [term (ir/block-term (first blocks) f)]
         (cond
-          (= op :return)
-            (if (= 1 (count refs))
-              (recur (rest blocks) (conj out (nth refs 0)))
-              nil)
+          ;; Block has no terminator — unreachable/dead block left over from
+          ;; build. Skip; only terminated :return blocks contribute return ids.
+          (nil? term)
+            (recur (rest blocks) out)
+          (= (ir/op term f) :return)
+            (let [refs (ir/refs term f)]
+              (if (= 1 (count refs))
+                (recur (rest blocks) (conj out (nth refs 0)))
+                nil))
           :else
             (recur (rest blocks) out))))))
 
