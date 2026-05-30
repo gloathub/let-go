@@ -77,6 +77,13 @@ const (
 	anchorName          = "BenchmarkRatchetAnchor"
 	anchorPackage       = "github.com/nooga/let-go/pkg/vm"
 	schemaVersion       = 1
+
+	// The default (CI-gating) scope: the end-to-end jank suite measured under
+	// both VM variants, plus the calibration anchor. This is deliberately tiny
+	// (~1 min) — the pkg/vm micro-benchmark fleet is only run under -full.
+	suitePackage = "github.com/nooga/let-go/test"
+	suiteFilter  = "^BenchmarkClojureTestSuite$"
+	anchorFilter = "^BenchmarkRatchetAnchor$"
 )
 
 // defaultPackages is the scope when no -packages flag is given.
@@ -196,6 +203,7 @@ func main() {
 		shaOverride  = flag.String("sha", "", "override the SHA recorded for this run (default: git rev-parse HEAD of cwd). Use when aggregating a capture from a worktree that differs from cwd.")
 		tags         = flag.String("tags", defaultTags, "go test -tags. Default 'gogen_ir' so the lowered-to-Go VM is compiled into the test binary alongside the bytecode VM. Has no effect on releases that pre-date the lowered-Go work (the build tag matches no files there).")
 		format       = flag.String("format", "text", "report format: text (default, ANSI terminal), markdown (GitHub/Slack-friendly table), json (the raw baseline)")
+		full         = flag.Bool("full", false, "run the FULL benchmark fleet (all default packages, every benchmark) under -tags. Slow (~25 min) — for manual deep-dives. Default gate runs only the jank suite under both VM variants + anchor (~1 min).")
 	)
 	flag.Parse()
 
@@ -232,17 +240,15 @@ func main() {
 	}
 
 	// check / update / show / capture all need a capture phase.
-	pkgList := strings.Fields(*packages)
-	if len(pkgList) == 0 {
-		pkgList = append(pkgList, defaultPackages...)
-	}
-	if len(pkgList) == 0 {
-		die("no benchmark packages found")
-	}
-
+	manual := *packages != "" || *filter != ""
 	filterRE, err := compileFilter(*filter)
 	if err != nil {
 		die("invalid -filter regexp: %v", err)
+	}
+
+	jobs, scope, err := buildJobs(*packages, *tags, *full, manual, filterRE)
+	if err != nil {
+		die("%v", err)
 	}
 
 	if *outPath == "" {
@@ -252,14 +258,22 @@ func main() {
 		_ = os.MkdirAll(dir, 0o755)
 	}
 
-	fmt.Printf("bench-ratchet: %s mode, %d package(s), budget=%.1f%%\n",
-		mode, len(pkgList), *budget*100)
-	for _, p := range pkgList {
-		fmt.Printf("  - %s\n", p)
+	fmt.Printf("bench-ratchet: %s mode, %s, %d job(s), budget=%.1f%%\n",
+		mode, scope, len(jobs), *budget*100)
+	for _, j := range jobs {
+		variant := ""
+		if j.variant != "" {
+			variant = " [" + j.variant + "]"
+		}
+		tagNote := ""
+		if j.tags != "" {
+			tagNote = " -tags " + j.tags
+		}
+		fmt.Printf("  - %s%s%s  (bench %s)\n", j.pkg, variant, tagNote, j.filter.String())
 	}
 	fmt.Printf("  raw .jsonl: %s\n", *outPath)
 
-	if err := captureToFile(pkgList, *count, *benchtime, *timeout, *tags, filterRE, *outPath); err != nil {
+	if err := captureJobs(jobs, *count, *benchtime, *timeout, *outPath); err != nil {
 		die("capture: %v", err)
 	}
 
@@ -520,7 +534,63 @@ func compileFilter(pattern string) (*regexp.Regexp, error) {
 // Non-zero exit from `go test` (panic, timeout, build failure) is
 // surfaced as a warning but doesn't abort the sweep — we move on to
 // the next package and whatever did emit lines is preserved.
-func captureToFile(pkgs []string, count int, benchtime, timeout, tags string, filter *regexp.Regexp, outPath string) error {
+// captureJob is one `go test -bench` invocation: a package under a specific
+// build-tag set and benchmark filter, with an optional variant label folded
+// into the recorded benchmark names so the same benchmark under two VM tags
+// produces two distinct baseline entries.
+type captureJob struct {
+	pkg     string
+	tags    string
+	filter  *regexp.Regexp
+	variant string
+}
+
+// buildJobs decides what gets benchmarked:
+//
+//   - manual (-packages or -filter given): honor them verbatim across the
+//     selected packages under -tags. Power-user escape hatch.
+//   - -full: the entire default fleet (pkg/vm micro-benches + the suite) under
+//     -tags. Slow; for deep-dives, not the CI gate.
+//   - default: the fast gate — the calibration anchor plus the end-to-end jank
+//     suite measured under BOTH VM variants (bytecode and gogen_ir-lowered),
+//     which is the only thing the ratchet needs to catch a real regression.
+func buildJobs(packages, tags string, full, manual bool, filterRE *regexp.Regexp) ([]captureJob, string, error) {
+	switch {
+	case manual:
+		pkgList := strings.Fields(packages)
+		if len(pkgList) == 0 {
+			pkgList = append(pkgList, defaultPackages...)
+		}
+		var jobs []captureJob
+		for _, p := range pkgList {
+			jobs = append(jobs, captureJob{pkg: p, tags: tags, filter: filterRE})
+		}
+		return jobs, "manual scope", nil
+	case full:
+		var jobs []captureJob
+		for _, p := range defaultPackages {
+			jobs = append(jobs, captureJob{pkg: p, tags: tags, filter: filterRE})
+		}
+		return jobs, "full fleet", nil
+	default:
+		anchorRE, err := regexp.Compile(anchorFilter)
+		if err != nil {
+			return nil, "", fmt.Errorf("anchor filter: %w", err)
+		}
+		suiteRE, err := regexp.Compile(suiteFilter)
+		if err != nil {
+			return nil, "", fmt.Errorf("suite filter: %w", err)
+		}
+		jobs := []captureJob{
+			{pkg: anchorPackage, tags: "", filter: anchorRE},
+			{pkg: suitePackage, tags: "", filter: suiteRE, variant: "bytecode"},
+			{pkg: suitePackage, tags: "gogen_ir", filter: suiteRE, variant: "gogen_ir"},
+		}
+		return jobs, "fast gate (jank ×2 + anchor)", nil
+	}
+}
+
+func captureJobs(jobs []captureJob, count int, benchtime, timeout, outPath string) error {
 	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", outPath, err)
@@ -528,14 +598,21 @@ func captureToFile(pkgs []string, count int, benchtime, timeout, tags string, fi
 	defer out.Close()
 	enc := json.NewEncoder(out)
 
-	for i, pkg := range pkgs {
-		fmt.Fprintf(os.Stderr, "  [%d/%d] %s ... ", i+1, len(pkgs), pkg)
-		count, err := captureOnePackage(pkg, count, benchtime, timeout, tags, filter, enc, out)
+	for i, j := range jobs {
+		label := j.pkg
+		if j.variant != "" {
+			label += " [" + j.variant + "]"
+		}
+		if j.tags != "" {
+			label += " -tags " + j.tags
+		}
+		fmt.Fprintf(os.Stderr, "  [%d/%d] %s ... ", i+1, len(jobs), label)
+		n, err := captureOnePackage(j.pkg, count, benchtime, timeout, j.tags, j.filter, j.variant, enc, out)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warn: %v (%d records captured)\n", err, count)
+			fmt.Fprintf(os.Stderr, "warn: %v (%d records captured)\n", err, n)
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "%d records\n", count)
+		fmt.Fprintf(os.Stderr, "%d records\n", n)
 	}
 	return nil
 }
@@ -547,7 +624,7 @@ func captureToFile(pkgs []string, count int, benchtime, timeout, tags string, fi
 // Returns the number of records written. An error indicates the go
 // test invocation itself failed (timeout, build error, missing
 // package). Partial results before the failure are still flushed.
-func captureOnePackage(pkg string, count int, benchtime, timeout, tags string, filter *regexp.Regexp, enc *json.Encoder, sync *os.File) (int, error) {
+func captureOnePackage(pkg string, count int, benchtime, timeout, tags string, filter *regexp.Regexp, variant string, enc *json.Encoder, sync *os.File) (int, error) {
 	args := []string{
 		"test",
 		"-run", "^$",
@@ -593,6 +670,13 @@ func captureOnePackage(pkg string, count int, benchtime, timeout, tags string, f
 		// It also tags the result with a "-N" GOMAXPROCS suffix
 		// (e.g. "RatchetAnchor-8"); strip via trimGoMaxProcsSuffix.
 		name := "Benchmark" + trimGoMaxProcsSuffix(string(rec.Name.Full()))
+		// A variant label (e.g. "bytecode" / "gogen_ir") distinguishes the
+		// same benchmark run under different VM build tags, so both land as
+		// separate baseline entries instead of colliding on package+name.
+		// The anchor is always recorded variant-free so findAnchor matches it.
+		if variant != "" {
+			name = name + " [" + variant + "]"
+		}
 
 		// benchfmt canonicalizes time units to "sec/op" so values are
 		// comparable across benchmarks that emit "ns/op" vs "ms/op".

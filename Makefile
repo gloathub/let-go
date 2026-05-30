@@ -128,6 +128,8 @@ clojure-compat-report: $(GO)
 #
 # All three are anchor-normalized — see cmd/bench-ratchet/main.go
 # and docs/perf/ratchet.md.
+# Default gate (~1 min): the jank suite under BOTH VM variants (bytecode +
+# gogen_ir-lowered) + the calibration anchor. This is what CI runs.
 bench-ratchet:
 	go run ./cmd/bench-ratchet check
 
@@ -148,6 +150,15 @@ parity-check:
 
 parity-full:
 	@scripts/gogen-parity.sh --full
+
+# Manual deep-dive (~25 min): the entire pkg/vm micro-benchmark fleet plus the
+# suite under -tags. Not gated in CI — run by hand when investigating a specific
+# regression. Pair with `update` to refresh the full baseline.
+bench-ratchet-full:
+	go run ./cmd/bench-ratchet -full check
+
+bench-ratchet-full-update:
+	go run ./cmd/bench-ratchet -full update
 
 clean:
 	$(RM) $(LG)
