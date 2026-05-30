@@ -6,6 +6,7 @@
 package rt
 
 import (
+	"context"
 	crand "crypto/rand"
 	_ "embed"
 	"fmt"
@@ -255,6 +256,20 @@ var (
 	tapsMu sync.Mutex
 	taps   []vm.Fn
 )
+
+// ClearTaps drops every registered tap fn. `add-tap` appends to a
+// process-global slice with no automatic removal, so a test that taps
+// without `remove-tap` (e.g. clojure-test-suite's taps.cljc) leaks its
+// tap closure — and, because all of a compile pass's fns share one
+// vm.Consts, the closure pins that whole constant pool. Re-running the
+// suite in a loop (BenchmarkClojureTestSuite) thus accumulates ~one
+// Consts pool per iteration. The bench calls this between iterations to
+// keep that from growing unboundedly.
+func ClearTaps() {
+	tapsMu.Lock()
+	taps = nil
+	tapsMu.Unlock()
+}
 
 // nsAliases maps alternative namespace names to canonical names.
 // e.g. "clojure.core" → "core", "clojure.test" → "test", "clojure.string" → "string"
@@ -3345,14 +3360,23 @@ func installLangNS() {
 			return vm.NIL, fmt.Errorf("go expected Fn")
 		}
 		ret := make(vm.Chan)
-		go func() {
+		vm.Goroutines.Go(func(ctx context.Context) {
 			v, err := at.Invoke(nil)
 			if err != nil {
 				fmt.Println(err)
 			}
-			ret <- v
+			// The result send is cancellable via the registry. (Channel
+			// ops <!/>! INSIDE the block are still synchronous and not yet
+			// ctx-aware — cancelling a go-block blocked on a take won't
+			// interrupt it; tracked as the same follow-up as the async.go
+			// channel primitives.)
+			select {
+			case ret <- v:
+			case <-ctx.Done():
+				return
+			}
 			close(ret)
-		}()
+		})
 		return ret, nil
 	})
 
@@ -3367,30 +3391,53 @@ func installLangNS() {
 		if len(vs) != 2 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
+		if vs[1] == vm.NIL {
+			return vm.NIL, fmt.Errorf(">! can't put nil on chan")
+		}
+		if pc, ok := asPromiseChan(vs[0]); ok {
+			pc.put(vs[1])
+			return vm.TRUE, nil
+		}
 		ch, ok := vs[0].(vm.Chan)
 		if !ok {
 			return vm.NIL, fmt.Errorf(">! expected Chan")
 		}
-		if vs[1] == vm.NIL {
-			return vm.NIL, fmt.Errorf(">! can't put nil on chan")
+		// Select on the registry context so a put parked on a full/unread
+		// channel — e.g. inside a (go ...) block — is released by a
+		// CancelAll/Drain on shutdown instead of leaking the goroutine.
+		// Cancellation returns nil (the put did not complete).
+		select {
+		case ch <- vs[1]:
+			return vm.TRUE, nil
+		case <-vm.Goroutines.Context().Done():
+			return vm.NIL, nil
 		}
-		ch <- vs[1]
-		return vm.TRUE, nil
 	})
 
 	changet, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
+		if pc, ok := asPromiseChan(vs[0]); ok {
+			return pc.take(vm.Goroutines.Context()), nil
+		}
 		ch, ok := vs[0].(vm.Chan)
 		if !ok {
 			return vm.NIL, fmt.Errorf("<! expected Chan")
 		}
-		v, ok := <-ch
-		if !ok {
-			return vm.NIL, nil // this is not an error
+		// Select on the registry context so a take parked on an empty
+		// channel — e.g. inside a (go ...) block — is released by a
+		// CancelAll/Drain on shutdown instead of leaking the goroutine.
+		// Both a closed channel and a cancel yield nil.
+		select {
+		case v, ok := <-ch:
+			if !ok {
+				return vm.NIL, nil // closed — not an error
+			}
+			return v, nil
+		case <-vm.Goroutines.Context().Done():
+			return vm.NIL, nil
 		}
-		return v, nil
 	})
 
 	lines, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
@@ -5459,7 +5506,7 @@ func installLangNS() {
 		}
 		snap := vm.SnapshotBindings()
 		p := vm.NewPromise()
-		go func() {
+		vm.Goroutines.Go(func(ctx context.Context) {
 			v, err := vm.RunWithBindings(snap, func() (vm.Value, error) {
 				return fn.Invoke(nil)
 			})
@@ -5468,7 +5515,7 @@ func installLangNS() {
 			} else {
 				p.Deliver(v)
 			}
-		}()
+		})
 		return p, nil
 	})
 
@@ -7003,13 +7050,25 @@ func installLangNS() {
 		if len(vs) != 1 {
 			return vm.NIL, fmt.Errorf("sleep expects 1 arg")
 		}
+		var d time.Duration
 		switch v := vs[0].(type) {
 		case vm.Int:
-			time.Sleep(time.Duration(int64(v)) * time.Millisecond)
+			d = time.Duration(int64(v)) * time.Millisecond
 		case vm.Float:
-			time.Sleep(time.Duration(int64(v)) * time.Millisecond)
+			d = time.Duration(int64(v)) * time.Millisecond
 		default:
 			return vm.NIL, fmt.Errorf("sleep expects a number")
+		}
+		// Cancellable sleep: return early if the VM goroutine registry's
+		// context is cancelled (e.g. a Drain between bench iterations or
+		// process shutdown), so a `(future (sleep 10000))` doesn't pin
+		// its goroutine — and the Consts pool it captured — for the full
+		// duration. Matches Clojure where an interrupted sleep aborts.
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-t.C:
+		case <-vm.Goroutines.Context().Done():
 		}
 		return vm.NIL, nil
 	})
