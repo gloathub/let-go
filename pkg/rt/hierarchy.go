@@ -32,6 +32,11 @@ var (
 	cljSeqable               = vm.Symbol("clojure.lang.Seqable")
 	cljIPersistentCollection = vm.Symbol("clojure.lang.IPersistentCollection")
 	cljIReduce               = vm.Symbol("clojure.lang.IReduce")
+	cljIEditableCollection   = vm.Symbol("clojure.lang.IEditableCollection")
+	// Throwable is registered bare (not under clojure.lang) by
+	// installClojureCompatAliases; ExInfo reports it as an ancestor so medley's
+	// ex-message/ex-cause (guarded by (instance? Throwable ex)) work on ex-info.
+	cljThrowable = vm.Symbol("Throwable")
 )
 
 func emptyHierarchy() *vm.PersistentMap {
@@ -457,14 +462,32 @@ func directTypeParents(tag vm.Value) *vm.PersistentSet {
 		result = setConj(result, cljSeqable)
 		result = setConj(result, cljIPersistentCollection)
 		result = setConj(result, cljIReduce)
-	case vm.MapType, vm.SortedMapType:
+		result = setConj(result, cljIEditableCollection)
+	case vm.MapType:
 		result = setConj(result, vm.AnyType)
 		result = setConj(result, cljAssociative)
 		result = setConj(result, cljCounted)
 		result = setConj(result, cljSeqable)
 		result = setConj(result, cljIPersistentCollection)
 		result = setConj(result, cljIReduce)
-	case vm.SetType, vm.SortedSetType:
+		result = setConj(result, cljIEditableCollection)
+	case vm.SortedMapType:
+		// Sorted maps have no transient form, so no IEditableCollection.
+		result = setConj(result, vm.AnyType)
+		result = setConj(result, cljAssociative)
+		result = setConj(result, cljCounted)
+		result = setConj(result, cljSeqable)
+		result = setConj(result, cljIPersistentCollection)
+		result = setConj(result, cljIReduce)
+	case vm.SetType:
+		result = setConj(result, vm.AnyType)
+		result = setConj(result, cljCounted)
+		result = setConj(result, cljSeqable)
+		result = setConj(result, cljIPersistentCollection)
+		result = setConj(result, cljIReduce)
+		result = setConj(result, cljIEditableCollection)
+	case vm.SortedSetType:
+		// Sorted sets have no transient form, so no IEditableCollection.
 		result = setConj(result, vm.AnyType)
 		result = setConj(result, cljCounted)
 		result = setConj(result, cljSeqable)
@@ -484,6 +507,12 @@ func directTypeParents(tag vm.Value) *vm.PersistentSet {
 		result = setConj(result, vm.AnyType)
 	case vm.PromiseType:
 		result = setConj(result, vm.AnyType)
+	case vm.ExInfoType:
+		// ex-info values are let-go's equivalent of Clojure's ExceptionInfo,
+		// which IS-A Throwable. Reporting the Throwable marker lets medley's
+		// (instance? Throwable ex) guard pass so ex-message/ex-cause work.
+		result = setConj(result, vm.AnyType)
+		result = setConj(result, cljThrowable)
 	default:
 		if _, ok := vt.(*vm.RecordType); ok {
 			result = setConj(result, vm.AnyType)

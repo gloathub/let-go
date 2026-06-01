@@ -5933,6 +5933,16 @@ func installLangNS() {
 		if t, ok := vs[0].(vm.ValueType); ok {
 			return vm.Boolean(vs[1].Type() == t), nil
 		}
+		// Clojure-compat interface markers (e.g. clojure.lang.IEditableCollection)
+		// are registered as plain symbols by installClojureCompatAliases. Answer
+		// instance? for them via the type→interface hierarchy so libraries that
+		// branch on (instance? clojure.lang.IEditableCollection coll) — like
+		// medley — observe the JVM-equivalent answer.
+		if marker, ok := vs[0].(vm.Symbol); ok {
+			if anc := directTypeAncestors(vs[1].Type()); anc != nil {
+				return vm.Boolean(anc.Contains(marker) == vm.TRUE), nil
+			}
+		}
 		// A protocol behaves like an interface: (instance? SomeProtocol x) is a
 		// membership test, matching Clojure where defprotocol generates a host
 		// interface.
@@ -6140,8 +6150,8 @@ func installLangNS() {
 
 	ns.Def("atom", atom)
 	ns.Def("reset!", reset)
-	ns.Def("compare-and-set!", compareAndSet)
 	ns.Def("swap!", swap)
+	ns.Def("compare-and-set!", compareAndSet)
 	ns.Def("swap-vals!", swapVals)
 	ns.Def("reset-vals!", resetVals)
 
@@ -7563,6 +7573,11 @@ func installClojureCompatAliases(ns *vm.Namespace) {
 		"clojure.lang.Seqable",
 		"clojure.lang.IPersistentCollection",
 		"clojure.lang.IReduce",
+		"clojure.lang.IEditableCollection",
+		// Bare in (instance? clojure.lang.PersistentQueue x).
+		// Leaf marker only — no type reports it as an ancestor, so queue? is
+		// always false (load-only; real PersistentQueue is out of scope).
+		"clojure.lang.PersistentQueue",
 	} {
 		ns.Def(name, vm.Symbol(name))
 	}
@@ -7599,6 +7614,81 @@ func installClojureCompatAliases(ns *vm.Namespace) {
 		panic(err)
 	}
 	mapEntryNS.Def("create", create)
+
+	// Interop-constructor sugar: (clojure.lang.MapEntry. k v) desugars to
+	// (->clojure.lang.MapEntry k v) in the compiler. medley's map-entry uses
+	// this form on its :default branch. Mirror the Integer./->Integer aliases.
+	ns.Def("->clojure.lang.MapEntry", create)
+	ns.Def("clojure.lang.MapEntry.", create)
+
+	// clojure.lang.PersistentQueue/EMPTY. let-go has no
+	// real PersistentQueue, so this is a load-only stub: it must merely resolve
+	// as a var at compile time (medley derefs it only at runtime inside `queue`).
+	// Bind it to a non-collection marker symbol rather than vm.EmptyList — that
+	// way medley's `(queue coll)` = `(into (queue) coll)` FAILS LOUDLY with
+	// "conj expected Collection" instead of silently returning a reversed list
+	// (a plausible-but-wrong FIFO). queue?/queue stay degraded by design.
+	DefNSBare("clojure.lang.PersistentQueue").Def("EMPTY", vm.Symbol("clojure.lang.PersistentQueue/EMPTY"))
+
+	// (java.util.ArrayList.) / (java.util.ArrayList. n).
+	// medley's partition-between / sliding build a mutable ArrayList on their
+	// :clj branch. let-go has no mutable ArrayList, so this is a load-only ctor
+	// stub: it lets those defns COMPILE (the constructor symbol must resolve).
+	// The stub returns a non-collection marker symbol, so the subsequent
+	// .add/.toArray/.clear/.size calls fail cleanly at runtime via let-go's
+	// normal method-dispatch error — partition-between/sliding throw if invoked.
+	arrayListStub, err := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) > 1 {
+			return vm.NIL, fmt.Errorf("java.util.ArrayList. expects 0 or 1 args, got %d", len(vs))
+		}
+		return vm.Symbol("java.util.ArrayList"), nil
+	})
+	if err != nil {
+		panic(err)
+	}
+	ns.Def("java.util.ArrayList", vm.Symbol("java.util.ArrayList"))
+	ns.Def("java.util.ArrayList.", arrayListStub)
+	ns.Def("->java.util.ArrayList", arrayListStub)
+
+	// bare Throwable in (instance? Throwable ex). Registered
+	// as a symbol marker; ExInfoType reports it as an ancestor (see hierarchy.go),
+	// so (instance? Throwable ex) is true for let-go ex-info values and false for
+	// everything else. Paired with ExInfo.InvokeMethod (getMessage/getCause), this
+	// makes medley's ex-message/ex-cause genuinely work on ex-info while still
+	// returning nil for all other types (medley's documented fallback).
+	ns.Def("Throwable", vm.Symbol("Throwable"))
+
+	// java.util.UUID statics. java.util.UUID is already a
+	// bare class alias to vm.UUIDType above; a same-named DefNSBare namespace for
+	// the statics is fine and has precedent in Boolean (bare + DefNSBare coexist).
+	// Both fns are REAL: fromString reuses vm.ParseUUID; randomUUID reuses the
+	// existing random-uuid builtin by value (mirrors the Integer./int alias). So
+	// m/uuid and m/random-uuid genuinely work.
+	uuidNS := DefNSBare("java.util.UUID")
+	uuidFromString, err := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 1 {
+			return vm.NIL, fmt.Errorf("java.util.UUID/fromString expects 1 arg")
+		}
+		s, ok := vs[0].(vm.String)
+		if !ok {
+			return vm.NIL, fmt.Errorf("java.util.UUID/fromString expects a string, got %s", vs[0].Type().Name())
+		}
+		u := vm.ParseUUID(string(s))
+		if u == nil {
+			return vm.NIL, fmt.Errorf("java.util.UUID/fromString: invalid UUID string %q", string(s))
+		}
+		return u, nil
+	})
+	if err != nil {
+		panic(err)
+	}
+	uuidNS.Def("fromString", uuidFromString)
+	uuidNS.Def("randomUUID", ns.Lookup("random-uuid").(*vm.Var).Deref())
+
+	// java.util.regex.Pattern bare in (instance? ... #"x").
+	// let-go already models regexes as vm.RegexType, so aliasing the JVM class to
+	// it makes m/regexp? genuinely work.
+	ns.Def("java.util.regex.Pattern", vm.RegexType)
 }
 
 func longCompatValue(v int64) vm.Value {
