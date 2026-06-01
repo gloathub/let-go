@@ -1288,7 +1288,12 @@ func readMeta(r *LispReader, _ rune) (vm.Value, error) {
 		case vm.Keyword:
 			m = m.(*vm.PersistentMap).Assoc(v, vm.TRUE).(*vm.PersistentMap)
 		case vm.Symbol:
-			m = m.(*vm.PersistentMap).Assoc(tagKey, v).(*vm.PersistentMap)
+			// A bare-symbol tag (`^Iterable x`) is a type hint. Preserve it as
+			// :tag metadata (the IR's typeinfer/lowering passes can use it), but
+			// quote it so the (often host-class) symbol is a datum, not an
+			// evaluated var reference that won't resolve.
+			quotedTag := vm.NewList([]vm.Value{vm.Symbol("quote"), v})
+			m = m.(*vm.PersistentMap).Assoc(tagKey, quotedTag).(*vm.PersistentMap)
 		case vm.String:
 			m = m.(*vm.PersistentMap).Assoc(tagKey, v).(*vm.PersistentMap)
 		default:

@@ -1059,6 +1059,15 @@ func compileBindings(c *Context, binds []vm.Value, opName string) (int, error) {
 	bindn := 0
 	for i := 0; i < len(binds); i += 2 {
 		name := binds[i]
+		// Strip a metadata wrapper from the binding name: `^long x` is read as
+		// `(with-meta x {:tag long})`. As with fn params, we don't yet attach
+		// the tag to the local (a future hook for the IR typeinfer pass), just
+		// unwrap to the bare symbol so the check below succeeds.
+		if lst, ok := name.(*vm.List); ok && lst.First() == vm.Symbol("with-meta") {
+			if rest := lst.Next(); rest != nil {
+				name = rest.First()
+			}
+		}
 		if name.Type() != vm.SymbolType {
 			return 0, NewCompileError(fmt.Sprintf("%s binding name must be a symbol: %v", opName, name))
 		}
