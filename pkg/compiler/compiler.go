@@ -8,6 +8,7 @@ package compiler
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/nooga/let-go/pkg/rt"
@@ -235,6 +236,19 @@ func (c *Context) enterFn(args []vm.Value) (*Context, error) {
 
 func (c *Context) leaveFn(ctx *Context) {
 	fnchunk := ctx.chunk
+	// Record parameter names as debug info (slot -> name), sorted by slot for
+	// deterministic output (formalArgs is a map). `_` and `&` are already
+	// excluded from formalArgs.
+	if len(ctx.formalArgs) > 0 {
+		params := make([]vm.LocalVar, 0, len(ctx.formalArgs))
+		for name, slot := range ctx.formalArgs {
+			params = append(params, vm.LocalVar{Slot: slot, Name: string(name)})
+		}
+		sort.Slice(params, func(i, j int) bool { return params[i].Slot < params[j].Slot })
+		for _, p := range params {
+			fnchunk.AddLocalVar(p.Slot, p.Name)
+		}
+	}
 	fnchunk.SetMaxStack(ctx.spMax)
 	f := vm.MakeFunc(ctx.argCount, ctx.variadric, fnchunk)
 	f.SetName(c.defName)
@@ -674,6 +688,11 @@ func (c *Context) popLocals() {
 
 func (c *Context) addLocal(name vm.Symbol) {
 	c.locals[len(c.locals)-1][name] = c.sp - 1
+	// Record the source name for this slot as debug info (slot -> name), so it
+	// survives into the bundle and can name locals in crash traces.
+	if name != "_" {
+		c.chunk.AddLocalVar(c.sp-1, string(name))
+	}
 	// Count every binding, even shadowed ones: the older slot is still on the
 	// stack and counts toward this scope's footprint. recurCompiler relies on
 	// this to compute `ignore` correctly when crossing a shadowing scope.
