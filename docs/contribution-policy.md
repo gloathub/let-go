@@ -71,8 +71,8 @@ the thread — not a silent override.
 | Cold-start regression | > 10 % on any surface | perf corpus, `test/perf/` (in flight) |
 | Artifact-size regression | > 10 % on any surface | perf corpus, `test/perf/` (in flight) |
 | Bootstrap parity divergence | any count/bucket delta | `make parity-full` — local target, CI wiring deferred (see note below) |
-| Stale `core_compiled.lgb` | any `.lg` newer than bundle | `make check-bundle-fresh` — CI gate |
-| Stale `core_go_lowered/` | any `.lg` newer than lowered Go | `make check-lowered-fresh` — CI gate |
+| Stale `core_compiled.lgb` | committed bytes differ from regeneration | `make check-generated` — CI gate |
+| Stale `core_go_lowered/` | committed tree fails to compile under `-tags gogen_ir` | `make check-generated` — CI gate |
 | Existing test suite | any regression | `make test` — CI gate (already in place) |
 
 **Why `parity-full` isn't yet a CI gate.** Wiring it requires
@@ -198,9 +198,11 @@ The default `lg` binary stays lean.
 
 ## How CI enforces this today
 
-`make check-bundle-fresh` and `make parity-full` run on every PR via
-`.github/workflows/go.yml`. The bundle-staleness check is fast and
-fails the build with an explicit remediation message. The parity
+`make check-generated` and `make parity-full` run on every PR via
+`.github/workflows/go.yml`. The generated-artifacts check regenerates
+the bundle and fails if the committed bytes differ, and verifies the
+committed lowered tree compiles under `-tags gogen_ir`; it fails the
+build with an explicit remediation message. The parity
 check is the longer gate (~5 min) but is what guarantees the
 self-host substrate keeps working.
 

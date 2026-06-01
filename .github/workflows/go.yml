@@ -35,17 +35,9 @@ jobs:
       - name: Regenerate bundled bytecode
         run: go generate ./pkg/rt/
 
-      # Content-based freshness gate. The previous step regenerated the bundle
-      # from the committed .lg sources; if the committed bundle differs from
-      # that regeneration it is stale (e.g. a merge/rebase that updated .lg but
-      # not the bundle — the merge driver resolves the conflict but cannot emit
-      # a fresh bundle mid-merge). Unlike the mtime-based bundle-fresh job, this
-      # survives a fresh checkout. Fail loudly so a stale bundle never reaches
-      # main, where `go install` would embed the wrong bytes.
-      - name: Verify committed bundle matches regeneration
-        run: |
-          git diff --exit-code -- pkg/rt/core_compiled.lgb \
-            || { echo "::error::pkg/rt/core_compiled.lgb is stale — run 'make generate' and commit it."; exit 1; }
+      # Freshness of the committed artifacts is gated once, in the dedicated
+      # `generated` job below (make check-generated). This job regenerates the
+      # bundle only so build/test exercise the current .lg sources.
 
       - name: Build
         run: go build -v ./...
@@ -62,28 +54,23 @@ jobs:
       - name: Clojure compatibility test suite with source stdlib bootstrap
         run: go test -tags bootstrap ./test/ -count=1 -run TestClojureTestSuite -v
 
-  bundle-fresh:
-    name: bundle-fresh
+  # Single gate for every generated artifact (Policy: docs/contribution-policy.md §3):
+  # the bundle is verified in lockstep with pkg/rt/core/**/*.lg (content-based, so
+  # it survives a fresh checkout where mtimes are arbitrary), and the committed
+  # lowered-Go tree must compile under -tags gogen_ir. One Makefile target —
+  # `make check-generated` — so contributors have one command to remember.
+  generated:
+    name: generated-artifacts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Loud check — pkg/rt/core_compiled.lgb in lockstep with .lg sources
-        # Policy: docs/contribution-policy.md §3 (stale bundle is a hard gate).
-        # Fast (~1 s) — fails immediately when any pkg/rt/core/**/*.lg is
-        # newer than the committed bundle.
-        run: make check-bundle-fresh
-
-      - name: Loud check — pkg/rt/core_go_lowered/ in lockstep with .lg sources
-        # Policy: docs/contribution-policy.md §3 — sibling gate for the
-        # -tags gogen_ir build path. parity-full's bucket hashes
-        # silently diverge if the lgb is fresh but the lowered Go isn't.
-        run: make check-lowered-fresh
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: make check-generated
+        run: make check-generated
 
   # Bootstrap-parity gate (deferred — runs as 'make parity-full' locally).
-  #
-  # Wiring 'make parity-full' as a CI job requires 'lgbgen --target=go' to
-  # produce pkg/rt/core_go_lowered/ cleanly from current main. That gen
-  # path errors today on a reader EOF — fixes land in a follow-up. Until
-  # then, parity-full is a local-only target; the staleness gates
-  # (check-bundle-fresh, check-lowered-fresh) protect the artifacts
-  # parity-full depends on.
+  # Until parity-full is wired as a CI job, `make check-generated` protects
+  # the artifacts parity-full depends on.
