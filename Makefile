@@ -74,6 +74,8 @@ generate: build
 # `version` deliberately stays "dev" (no honest release version on an untagged
 # build). Falls back to "none" outside a git checkout.
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+PERF-TIMELINE-DIR ?= docs/perf/timeline
+PERF-SNAPSHOT ?= $(PERF-TIMELINE-DIR)/$(shell date -u +%Y%m%dT%H%M%SZ)-$(COMMIT).json
 
 $(LG): $(GO) lg.go pkg/**/* pkg/rt/core_compiled.lgb
 	which go
@@ -100,6 +102,13 @@ clojure-compat-report: $(GO)
 #
 # All three are anchor-normalized — see cmd/bench-ratchet/main.go
 # and docs/perf/ratchet.md.
+perf-page:
+	go run ./cmd/perf-page -out docs/perf/index.html
+
+perf-snapshot: lowered
+	mkdir -p $(PERF-TIMELINE-DIR)
+	go run ./cmd/bench-ratchet -full -baseline $(PERF-SNAPSHOT) snapshot
+
 # Regenerate the gitignored gogen_ir lowered tree (a build artifact, not
 # committed — see check-generated). Any target that builds -tags gogen_ir
 # depends on this. Cheap relative to the runs that follow.
@@ -130,9 +139,9 @@ parity-check:
 parity-full:
 	@scripts/gogen-parity.sh --full
 
-# Manual deep-dive (~25 min): the entire pkg/vm micro-benchmark fleet plus the
-# suite under -tags. Not gated in CI — run by hand when investigating a specific
-# regression. Pair with `update` to refresh the full baseline.
+# Manual deep-dive (~25 min): the pkg/vm fleet plus suite/IR variants. Not
+# gated in PR CI — run by hand when investigating a specific regression. Pair
+# with `update` to refresh the full baseline.
 bench-ratchet-full: lowered
 	go run ./cmd/bench-ratchet -full check
 
@@ -229,4 +238,4 @@ fanout-ratchet-show: build
 	./lg scripts/fanout-ratchet.lg show --go "$$(command -v go)"
 
 # PHONY targets are for ones that have conflicting files/dirs present:
-.PHONY: test bench-ratchet bench-ratchet-update bench-ratchet-show install-hooks check-generated fanout-ratchet fanout-ratchet-update fanout-ratchet-show
+.PHONY: test bench-ratchet bench-ratchet-update bench-ratchet-show perf-page perf-snapshot install-hooks check-generated fanout-ratchet fanout-ratchet-update fanout-ratchet-show

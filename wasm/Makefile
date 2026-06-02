@@ -8,6 +8,7 @@ build:
 pages: build
 	mkdir -p static
 	cp index.html letgo.wasm wasm_exec.js logo.svg static
+	cd .. && go run ./cmd/perf-page -out wasm/static/perf/index.html
 
 clean:
 	rm -f letgo.wasm wasm_exec.js logo.svg

@@ -1,0 +1,77 @@
+name: Perf Timeline
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/perf/index.html'
+      - 'docs/perf/timeline/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: perf-timeline-main
+  cancel-in-progress: false
+
+jobs:
+  profile:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Generate lowered runtime
+        run: make lowered
+
+      - name: Capture full perf snapshot
+        id: perf
+        run: |
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          commit_epoch="$(git show -s --format=%ct HEAD)"
+          stamp="$(date -u -d "@${commit_epoch}" +%Y%m%dT%H%M%SZ)"
+          snapshot_name="${stamp}-${short_sha}.json"
+          snapshot_tmp="${RUNNER_TEMP}/${snapshot_name}"
+          raw_tmp="${RUNNER_TEMP}/${snapshot_name%.json}.jsonl"
+
+          go run ./cmd/bench-ratchet \
+            -full \
+            -count 3 \
+            -benchtime 2s \
+            -timeout 30m \
+            -out "${raw_tmp}" \
+            -baseline "${snapshot_tmp}" \
+            snapshot
+
+          echo "snapshot_name=${snapshot_name}" >> "${GITHUB_OUTPUT}"
+          echo "snapshot_tmp=${snapshot_tmp}" >> "${GITHUB_OUTPUT}"
+
+      - name: Commit perf snapshot and page
+        run: |
+          git checkout -B main origin/main
+          git pull --rebase origin main
+          mkdir -p docs/perf/timeline
+          cp "${{ steps.perf.outputs.snapshot_tmp }}" "docs/perf/timeline/${{ steps.perf.outputs.snapshot_name }}"
+          go run ./cmd/perf-page -out docs/perf/index.html
+
+          git add docs/perf/timeline docs/perf/index.html
+          if git diff --cached --quiet; then
+            echo "No perf changes to commit."
+            exit 0
+          fi
+          git commit -m "perf: record timeline snapshot for ${{ github.sha }}"
+          git push origin HEAD:main

@@ -19,6 +19,9 @@ Two phases, separately invokable:
    single test from blocking the whole sweep forever.
 2. **aggregate** — reads one or more `.jsonl` files, normalizes
    against the anchor, emits the consolidated `baseline.json`.
+3. **snapshot** — captures and aggregates like `show`, then writes
+   the current run as an immutable JSON snapshot. This is for timeline
+   graphs and does not ratchet or update `baseline.json`.
 
 The one-shot `check` / `update` / `show` modes are just wrappers:
 capture-then-aggregate-then-(compare|write|print).
@@ -32,21 +35,28 @@ capture-then-aggregate-then-(compare|write|print).
 | `test/zz_bench_test.go` | `BenchmarkClojureTestSuite` — end-to-end wall time of the full clojure-test-suite (jank) corpus. Catches compile + run regressions that pkg/vm micro-benches don't see. |
 | `docs/perf/baseline.json` | The current committed baseline. |
 | `docs/perf/historical/*.json` | Frozen historical snapshots (e.g. `v1.8.0.json`). Captured against the same anchor so any current run can `-baseline docs/perf/historical/v1.8.0.json check` and see "how much have we drifted since release N." |
+| `docs/perf/timeline/*.json` | Append-only full perf snapshots captured on pushes to `main`. These drive trend charts and record actual runs over time. |
+| `docs/perf/index.html` | Static "Are we fast yet?" page generated from the committed baseline, historical snapshots, and timeline snapshots. |
+| `cmd/perf-page/main.go` | Static page generator. It renders HTML only; it never runs benchmarks. |
 | `docs/perf/.runs/*.jsonl` | Raw capture output. Gitignored; recreated on each run. |
-| `Makefile` targets | `bench-ratchet`, `bench-ratchet-update`, `bench-ratchet-show`. |
+| `.github/workflows/perf-timeline.yml` | Main-only CI job that records timeline snapshots and commits the regenerated static page. |
+| `Makefile` targets | `bench-ratchet`, `bench-ratchet-update`, `bench-ratchet-show`, `perf-snapshot`, `perf-page`. |
 
 ## Scope
 
-Default packages: `pkg/vm` (VM-runtime micro-benchmarks + the anchor)
-and `./test` (BenchmarkClojureTestSuite — the end-to-end "real Lisp at
-scale" wall time over the full clojure-test-suite corpus, 232 files,
-5621 assertions, 100% pass rate).
+Default gate: calibration anchor, BenchmarkClojureTestSuite under both
+bytecode and `gogen_ir`, and the targeted `pkg/ir` BenchmarkIRCompile
+under both bytecode and `gogen_ir`.
+
+Full profile (`-full`): the broad timeline/deep-dive profile. It runs
+the full `pkg/vm` benchmark fleet under `-tags gogen_ir`, plus the
+suite and IR compile benchmark under both bytecode and `gogen_ir`.
 
 Deliberately out of scope: `pkg/compiler` (compile time — measured by
-parity scripts), `pkg/bytecode` (decode time — measured at `make build`),
-`pkg/ir` (IR pipeline internals — measured by ir-stress). Keeping the
-ratchet narrow means a slow compiler change doesn't trip a runtime gate
-AND each in-scope bench gets more of the sample budget.
+parity scripts) and `pkg/bytecode` (decode time — measured at `make
+build`). Keeping the ratchet narrow means a slow compiler change
+doesn't trip a runtime gate AND each in-scope bench gets more of the
+sample budget.
 
 Override via `-packages "github.com/nooga/let-go/pkg/X github.com/.../Y"`.
 
@@ -69,6 +79,8 @@ One-shot (Makefile):
 make bench-ratchet           # check current vs baseline (CI mode)
 make bench-ratchet-update    # overwrite baseline with current numbers
 make bench-ratchet-show      # capture & print, write nothing
+make perf-page               # refresh docs/perf/index.html from committed JSON
+make perf-snapshot           # full capture into docs/perf/timeline/<ts>-<sha>.json
 ```
 
 Explicit two-phase (useful when you want progress visibility, or are
@@ -79,6 +91,8 @@ capturing on one machine and aggregating on another):
 go run ./cmd/bench-ratchet -out /tmp/run.jsonl capture
 # Aggregate to a baseline
 go run ./cmd/bench-ratchet -in /tmp/run.jsonl -baseline /tmp/b.json aggregate
+# Aggregate to an immutable timeline snapshot
+go run ./cmd/bench-ratchet -in /tmp/run.jsonl -baseline docs/perf/timeline/<ts>-<sha>.json snapshot
 ```
 
 Finer control on either phase:
