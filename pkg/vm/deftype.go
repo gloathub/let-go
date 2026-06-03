@@ -43,6 +43,7 @@ func (t *DType) Box(bare any) (Value, error) {
 type DTypeInstance struct {
 	dtype  *DType
 	fields []Value
+	meta   Value // IMeta support (e.g. (with-meta (->Foo) m) / reify)
 }
 
 func NewDTypeInstance(dt *DType, fields []Value) *DTypeInstance {
@@ -61,7 +62,24 @@ func NewDTypeInstance(dt *DType, fields []Value) *DTypeInstance {
 }
 
 func (d *DTypeInstance) Type() ValueType { return d.dtype }
-func (d *DTypeInstance) Unbox() any      { return d }
+
+// Meta implements IMeta.
+func (d *DTypeInstance) Meta() Value {
+	if d.meta == nil {
+		return NIL
+	}
+	return d.meta
+}
+
+// WithMeta implements IMeta. Returns a copy carrying m; field storage is
+// shared with the original (metadata does not affect fields).
+func (d *DTypeInstance) WithMeta(m Value) Value {
+	cp := *d
+	cp.meta = m
+	return &cp
+}
+
+func (d *DTypeInstance) Unbox() any { return d }
 
 func (d *DTypeInstance) String() string {
 	b := &strings.Builder{}

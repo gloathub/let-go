@@ -1,0 +1,19 @@
+(ns test.protocol-with-meta-test
+  (:require
+   [test :refer :all]))
+
+(defprotocol PMeta (pm-foo [x]))
+(deftype TM [a])
+
+(deftest with-meta-reference-types
+  (testing "with-meta attaches REAL metadata to protocols (now IMeta)"
+    (is (= {:doc "hi"} (meta (with-meta PMeta {:doc "hi"}))))
+    (is (nil? (meta PMeta))))
+  (testing "with-meta attaches REAL metadata to deftype/reify instances (now IMeta)"
+    (let [t (->TM 1) t2 (with-meta t {:k 1})]
+      (is (= {:k 1} (meta t2)))
+      (is (nil? (meta t)))              ; original unchanged
+      (is (= 1 (.a t2)))))              ; fields preserved
+  (testing "with-meta is a no-op on non-IMeta scalars (backs ^long type-hint compilation)"
+    (is (= 1 (with-meta 1 {:tag 'long})))
+    (is (= "x" (with-meta "x" {})))))

@@ -13,6 +13,7 @@ type Protocol struct {
 	methods []Symbol                     // method names
 	impls   map[ValueType]*PersistentMap // type → {method-name → fn}
 	nilImpl *PersistentMap               // implementation for nil
+	meta    Value                        // IMeta support
 }
 
 func NewProtocol(name string, methods []Symbol) *Protocol {
@@ -28,6 +29,22 @@ func (p *Protocol) Unbox() any        { return p }
 func (p *Protocol) String() string    { return fmt.Sprintf("<protocol %s>", p.name) }
 func (p *Protocol) Name() string      { return p.name }
 func (p *Protocol) Methods() []Symbol { return p.methods }
+
+// Meta implements IMeta.
+func (p *Protocol) Meta() Value {
+	if p.meta == nil {
+		return NIL
+	}
+	return p.meta
+}
+
+// WithMeta implements IMeta. Returns a copy carrying m; dispatch tables are
+// shared with the original (metadata does not affect protocol dispatch).
+func (p *Protocol) WithMeta(m Value) Value {
+	cp := *p
+	cp.meta = m
+	return &cp
+}
 
 // Extend adds implementations for a type.
 // implMap is a PersistentMap of {method-keyword → fn}.

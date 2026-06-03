@@ -5135,6 +5135,11 @@ func installLangNS() {
 		}
 		m, ok := vs[0].(vm.IMeta)
 		if !ok {
+			// Non-IMeta values pass through unchanged. This is load-bearing:
+			// let-go compiles value-position type hints (e.g. `^long x`) into
+			// runtime with-meta calls, so erroring here would break every
+			// hinted scalar. Reference types (deftype/reify instances,
+			// protocols, collections) ARE IMeta and carry metadata for real.
 			return vs[0], nil
 		}
 		return m.WithMeta(vs[1]), nil
