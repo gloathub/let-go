@@ -65,6 +65,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nooga/let-go/pkg/perfdata"
 	"golang.org/x/perf/benchfmt"
 )
 
@@ -122,59 +123,12 @@ var defaultPackages = []string{
 	"github.com/nooga/let-go/test",
 }
 
-// Baseline is the on-disk format. Keep field tags stable.
-type Baseline struct {
-	Version       int                       `json:"version"`
-	CapturedAt    string                    `json:"captured_at"`
-	CapturedAtSHA string                    `json:"captured_at_sha"`
-	Machine       Machine                   `json:"machine"`
-	Anchor        AnchorRecord              `json:"anchor"`
-	Benchmarks    map[string]BenchmarkEntry `json:"benchmarks"`
-}
-
-// Machine fingerprint. Anything that affects benchmark numbers in a
-// way an anchor can't fully normalize (architecture, cpu model,
-// frequency scaling defaults, go runtime version).
-type Machine struct {
-	OS        string `json:"os"`
-	Arch      string `json:"arch"`
-	NumCPU    int    `json:"num_cpu"`
-	CPUModel  string `json:"cpu_model"`
-	GoVersion string `json:"go_version"`
-}
-
-// AnchorRecord captures the absolute speed of the anchor benchmark on
-// the machine where the baseline was taken. Useful for sanity-checking
-// that the anchor itself hasn't drifted (e.g. a new Go release that
-// compiles it differently).
-type AnchorRecord struct {
-	Name       string  `json:"name"`
-	Package    string  `json:"package"`
-	NSPerOp    float64 `json:"ns_per_op"`
-	Iterations int64   `json:"iterations,omitempty"`
-}
-
-// BenchmarkEntry is one benchmark's current best. ratio_to_anchor is
-// the load-bearing field for comparisons; ns_per_op is for context.
-//
-// BestSinceSHA / BestSinceAt record the most recent ratchet tighten
-// for this entry — the commit and timestamp that set the current bar.
-// When ratchetMerge tightens any metric, both stamps move forward to
-// the run's commit/time. When nothing tightens, the stamps stay put.
-// New benchmarks get the run's stamp; missing-from-current benchmarks
-// keep their prior stamp.
-//
-// The fields are additive (omitempty) so this struct still loads old
-// baselines that pre-date the provenance work — they just come back
-// with empty stamps and get filled in on the next ratchet.
-type BenchmarkEntry struct {
-	NSPerOp       float64 `json:"ns_per_op"`
-	AllocsPerOp   int64   `json:"allocs_per_op"`
-	BytesPerOp    int64   `json:"bytes_per_op"`
-	RatioToAnchor float64 `json:"ratio_to_anchor"`
-	BestSinceSHA  string  `json:"best_since_sha,omitempty"`
-	BestSinceAt   string  `json:"best_since_at,omitempty"`
-}
+type Baseline = perfdata.Baseline
+type Machine = perfdata.Machine
+type AnchorRecord = perfdata.Anchor
+type BenchmarkEntry = perfdata.BenchmarkEntry
+type BenchmarkSample = perfdata.BenchmarkSample
+type StreamRecord = perfdata.StreamRecord
 
 // Result is the in-memory parse of one benchmark line.
 type Result struct {
@@ -184,24 +138,12 @@ type Result struct {
 	NSPerOp     float64
 	BytesPerOp  int64
 	AllocsPerOp int64
+	Samples     []BenchmarkSample
 }
 
 // FullName is "<package>.<benchmark name without -N suffix>".
 func (r Result) FullName() string {
 	return r.Package + "." + r.Name
-}
-
-// StreamRecord is one .jsonl line. The capture phase appends one of
-// these per benchmark per `go test -count` repetition; the aggregate
-// phase reads them back and averages by (package, name).
-type StreamRecord struct {
-	Package     string  `json:"package"`
-	Name        string  `json:"name"`
-	Iterations  int64   `json:"iterations"`
-	NSPerOp     float64 `json:"ns_per_op"`
-	BytesPerOp  int64   `json:"bytes_per_op"`
-	AllocsPerOp int64   `json:"allocs_per_op"`
-	CapturedAt  string  `json:"captured_at"`
 }
 
 func main() {
@@ -449,10 +391,12 @@ func ratchetMerge(existing, current Baseline) (Baseline, RatchetSummary) {
 		if tightened {
 			merged.BestSinceSHA = current.CapturedAtSHA
 			merged.BestSinceAt = current.CapturedAt
+			merged.Samples = cur.Samples
 			summary.Tightened = append(summary.Tightened, SummaryEntry{Name: name, NSPerOp: merged.NSPerOp})
 		} else {
 			merged.BestSinceSHA = base.BestSinceSHA
 			merged.BestSinceAt = base.BestSinceAt
+			merged.Samples = base.Samples
 		}
 		out.Benchmarks[name] = merged
 		if regressedOnSome {
@@ -792,6 +736,7 @@ func aggregateFromFile(path string) (Baseline, error) {
 		count                     int
 		nsSum, bytesSum, allocSum float64
 		iters                     int64
+		samples                   []BenchmarkSample
 	}
 	byName := map[string]*accum{}
 	dec := json.NewDecoder(f)
@@ -813,6 +758,7 @@ func aggregateFromFile(path string) (Baseline, error) {
 		if rec.Iterations > a.iters {
 			a.iters = rec.Iterations
 		}
+		a.samples = append(a.samples, rec.Sample())
 	}
 
 	var results []Result
@@ -824,6 +770,7 @@ func aggregateFromFile(path string) (Baseline, error) {
 			NSPerOp:     a.nsSum / float64(a.count),
 			BytesPerOp:  int64(a.bytesSum / float64(a.count)),
 			AllocsPerOp: int64(a.allocSum / float64(a.count)),
+			Samples:     append([]BenchmarkSample(nil), a.samples...),
 		})
 	}
 	sort.Slice(results, func(i, j int) bool { return results[i].FullName() < results[j].FullName() })
@@ -854,11 +801,16 @@ func buildCurrentBaseline(results []Result, anchor Result) Baseline {
 		if r.Name == anchorName {
 			continue
 		}
+		samples := append([]BenchmarkSample(nil), r.Samples...)
+		for i := range samples {
+			samples[i].RatioToAnchor = samples[i].NSPerOp / anchor.NSPerOp
+		}
 		bm[r.FullName()] = BenchmarkEntry{
 			NSPerOp:       r.NSPerOp,
 			AllocsPerOp:   r.AllocsPerOp,
 			BytesPerOp:    r.BytesPerOp,
 			RatioToAnchor: r.NSPerOp / anchor.NSPerOp,
+			Samples:       samples,
 		}
 	}
 	return Baseline{
@@ -871,6 +823,7 @@ func buildCurrentBaseline(results []Result, anchor Result) Baseline {
 			Package:    anchor.Package,
 			NSPerOp:    anchor.NSPerOp,
 			Iterations: anchor.Iterations,
+			Samples:    append([]BenchmarkSample(nil), anchor.Samples...),
 		},
 		Benchmarks: bm,
 	}
@@ -929,7 +882,31 @@ func writeBaseline(path string, b Baseline) error {
 		return err
 	}
 	body = append(body, '\n')
-	return os.WriteFile(path, body, 0o644)
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func readBaseline(path string) (Baseline, error) {

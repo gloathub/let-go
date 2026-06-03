@@ -56,6 +56,7 @@ jobs:
             -out "${raw_tmp}" \
             -baseline "${snapshot_tmp}" \
             snapshot
+          # The committed snapshot embeds the per-run samples from raw_tmp.
 
           echo "snapshot_name=${snapshot_name}" >> "${GITHUB_OUTPUT}"
           echo "snapshot_tmp=${snapshot_tmp}" >> "${GITHUB_OUTPUT}"

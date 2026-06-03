@@ -13,42 +13,19 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/nooga/let-go/pkg/perfdata"
+	"golang.org/x/perf/benchunit"
 )
 
 const modulePrefix = "github.com/nooga/let-go/"
 
-type Baseline struct {
-	Version       int                       `json:"version"`
-	CapturedAt    string                    `json:"captured_at"`
-	CapturedAtSHA string                    `json:"captured_at_sha"`
-	Machine       Machine                   `json:"machine"`
-	Anchor        Anchor                    `json:"anchor"`
-	Benchmarks    map[string]BenchmarkEntry `json:"benchmarks"`
-}
-
-type Machine struct {
-	OS        string `json:"os"`
-	Arch      string `json:"arch"`
-	NumCPU    int    `json:"num_cpu"`
-	CPUModel  string `json:"cpu_model"`
-	GoVersion string `json:"go_version"`
-}
-
-type Anchor struct {
-	Name       string  `json:"name"`
-	Package    string  `json:"package"`
-	NSPerOp    float64 `json:"ns_per_op"`
-	Iterations int64   `json:"iterations"`
-}
-
-type BenchmarkEntry struct {
-	NSPerOp      float64 `json:"ns_per_op"`
-	AllocsPerOp  float64 `json:"allocs_per_op"`
-	BytesPerOp   float64 `json:"bytes_per_op"`
-	Ratio        float64 `json:"ratio_to_anchor"`
-	BestSinceSHA string  `json:"best_since_sha"`
-	BestSinceAt  string  `json:"best_since_at"`
-}
+type Baseline = perfdata.Baseline
+type Machine = perfdata.Machine
+type Anchor = perfdata.Anchor
+type BenchmarkEntry = perfdata.BenchmarkEntry
 
 type BenchmarkRow struct {
 	FullName     string
@@ -210,7 +187,8 @@ func loadLatestHistorical(dir string) (Baseline, string, error) {
 	for _, match := range matches {
 		baseline, err := loadBaseline(match)
 		if err != nil {
-			return Baseline{}, "", err
+			warnSkipBaseline(match, err)
+			continue
 		}
 		captured, _ := time.Parse(time.RFC3339, baseline.CapturedAt)
 		name := strings.TrimSuffix(filepath.Base(match), filepath.Ext(match))
@@ -220,6 +198,9 @@ func loadLatestHistorical(dir string) (Baseline, string, error) {
 			baseline: baseline,
 			captured: captured,
 		})
+	}
+	if len(all) == 0 {
+		return Baseline{}, "", nil
 	}
 	sort.Slice(all, func(i, j int) bool {
 		if !all[i].captured.Equal(all[j].captured) {
@@ -239,7 +220,8 @@ func loadTimeline(timelineDir, historicalDir string, current Baseline) ([]Snapsh
 	for _, match := range matches {
 		baseline, err := loadBaseline(match)
 		if err != nil {
-			return nil, err
+			warnSkipBaseline(match, err)
+			continue
 		}
 		snapshots = append(snapshots, makeSnapshot(strings.TrimSuffix(filepath.Base(match), filepath.Ext(match)), baseline))
 	}
@@ -251,7 +233,8 @@ func loadTimeline(timelineDir, historicalDir string, current Baseline) ([]Snapsh
 		for _, match := range historical {
 			baseline, err := loadBaseline(match)
 			if err != nil {
-				return nil, err
+				warnSkipBaseline(match, err)
+				continue
 			}
 			snapshots = append(snapshots, makeSnapshot(strings.TrimSuffix(filepath.Base(match), filepath.Ext(match)), baseline))
 		}
@@ -267,6 +250,10 @@ func loadTimeline(timelineDir, historicalDir string, current Baseline) ([]Snapsh
 		return snapshots[i].Name < snapshots[j].Name
 	})
 	return snapshots, nil
+}
+
+func warnSkipBaseline(path string, err error) {
+	fmt.Fprintf(os.Stderr, "perf-page: warning: skipping %s: %v\n", path, err)
 }
 
 func makeSnapshot(name string, baseline Baseline) Snapshot {
@@ -348,7 +335,7 @@ func buildCharts(timeline []Snapshot) []Chart {
 			title:    "End-to-end suite",
 			subtitle: "Anchor-normalized jank clojure-test-suite wall time. Lower is better.",
 			unit:     "anchors",
-			metric:   func(entry BenchmarkEntry) float64 { return entry.Ratio },
+			metric:   func(entry BenchmarkEntry) float64 { return entry.RatioToAnchor },
 			format:   formatRatio,
 			series: []chartSeriesSpec{
 				{label: "bytecode", color: "#245c73", name: "github.com/nooga/let-go/test.BenchmarkClojureTestSuite [bytecode]"},
@@ -359,7 +346,7 @@ func buildCharts(timeline []Snapshot) []Chart {
 			title:    "IR compile",
 			subtitle: "Anchor-normalized IR compile benchmark variants. Lower is better.",
 			unit:     "anchors",
-			metric:   func(entry BenchmarkEntry) float64 { return entry.Ratio },
+			metric:   func(entry BenchmarkEntry) float64 { return entry.RatioToAnchor },
 			format:   formatRatio,
 			series: []chartSeriesSpec{
 				{label: "bytecode", color: "#245c73", name: "github.com/nooga/let-go/pkg/ir.BenchmarkIRCompile [bytecode]"},
@@ -370,7 +357,7 @@ func buildCharts(timeline []Snapshot) []Chart {
 			title:    "Suite allocations",
 			subtitle: "allocs/op for the full suite benchmark variants. Lower is better.",
 			unit:     "allocs/op",
-			metric:   func(entry BenchmarkEntry) float64 { return entry.AllocsPerOp },
+			metric:   func(entry BenchmarkEntry) float64 { return float64(entry.AllocsPerOp) },
 			format:   formatCount,
 			series: []chartSeriesSpec{
 				{label: "bytecode", color: "#245c73", name: "github.com/nooga/let-go/test.BenchmarkClojureTestSuite [bytecode]"},
@@ -381,7 +368,7 @@ func buildCharts(timeline []Snapshot) []Chart {
 			title:    "Suite memory",
 			subtitle: "bytes/op for the full suite benchmark variants. Lower is better.",
 			unit:     "B/op",
-			metric:   func(entry BenchmarkEntry) float64 { return entry.BytesPerOp },
+			metric:   func(entry BenchmarkEntry) float64 { return float64(entry.BytesPerOp) },
 			format:   formatBytes,
 			series: []chartSeriesSpec{
 				{label: "bytecode", color: "#245c73", name: "github.com/nooga/let-go/test.BenchmarkClojureTestSuite [bytecode]"},
@@ -526,9 +513,9 @@ func benchmarkRows(baseline Baseline) []BenchmarkRow {
 			Package:      pkg,
 			Name:         name,
 			NSPerOp:      entry.NSPerOp,
-			AllocsPerOp:  entry.AllocsPerOp,
-			BytesPerOp:   entry.BytesPerOp,
-			Ratio:        entry.Ratio,
+			AllocsPerOp:  float64(entry.AllocsPerOp),
+			BytesPerOp:   float64(entry.BytesPerOp),
+			Ratio:        entry.RatioToAnchor,
 			BestSinceSHA: entry.BestSinceSHA,
 			BestSinceAt:  entry.BestSinceAt,
 		})
@@ -564,10 +551,10 @@ func compare(current, reference Baseline) (map[string]float64, Summary) {
 			summary.New++
 			continue
 		}
-		if ref.Ratio == 0 {
+		if ref.RatioToAnchor == 0 {
 			continue
 		}
-		delta := cur.Ratio/ref.Ratio - 1
+		delta := cur.RatioToAnchor/ref.RatioToAnchor - 1
 		changes[name] = delta
 		deltas = append(deltas, delta)
 		summary.Common++
@@ -594,15 +581,15 @@ func topChanges(current, reference Baseline, limit int) ([]ChangeRow, []ChangeRo
 	for _, row := range benchmarkRows(current) {
 		cur := current.Benchmarks[row.FullName]
 		ref, ok := reference.Benchmarks[row.FullName]
-		if !ok || ref.Ratio == 0 {
+		if !ok || ref.RatioToAnchor == 0 {
 			continue
 		}
-		delta := cur.Ratio/ref.Ratio - 1
+		delta := cur.RatioToAnchor/ref.RatioToAnchor - 1
 		row.Delta = &delta
 		rows = append(rows, ChangeRow{
 			BenchmarkRow: row,
-			OldRatio:     ref.Ratio,
-			NewRatio:     cur.Ratio,
+			OldRatio:     ref.RatioToAnchor,
+			NewRatio:     cur.RatioToAnchor,
 		})
 	}
 
@@ -698,31 +685,68 @@ func shortSHA(value string) string {
 }
 
 func formatNS(value float64) string {
-	switch {
-	case value < 1_000:
-		return fmt.Sprintf("%.2f ns", value)
-	case value < 1_000_000:
-		return fmt.Sprintf("%.2f us", value/1_000)
-	case value < 1_000_000_000:
-		return fmt.Sprintf("%.2f ms", value/1_000_000)
-	default:
-		return fmt.Sprintf("%.2f s", value/1_000_000_000)
-	}
+	return formatScaledUnit(value, "ns")
 }
 
 func formatBytes(value float64) string {
-	switch {
-	case value < 1024:
-		return fmt.Sprintf("%.0f B", value)
-	case value < 1024*1024:
-		return fmt.Sprintf("%.1f KiB", value/1024)
-	default:
-		return fmt.Sprintf("%.1f MiB", value/(1024*1024))
-	}
+	return formatScaledUnit(value, "B")
 }
 
 func formatCount(value float64) string {
-	return formatCompact(value)
+	number, prefix := splitBenchunitScale(benchunit.Scale(value, benchunit.Decimal))
+	return trimScaledNumber(number) + prefix
+}
+
+func formatScaledUnit(value float64, unit string) string {
+	tidiedValue, tidiedUnit := benchunit.Tidy(value, unit)
+	number, prefix := splitBenchunitScale(benchunit.Scale(tidiedValue, benchunit.ClassOf(tidiedUnit)))
+	return trimScaledNumber(number) + " " + displayUnit(prefix, tidiedUnit)
+}
+
+func splitBenchunitScale(value string) (string, string) {
+	idx := len(value)
+	for idx > 0 {
+		r, size := utf8.DecodeLastRuneInString(value[:idx])
+		if r == '.' || r == '-' || r == '+' || unicode.IsDigit(r) {
+			break
+		}
+		idx -= size
+	}
+	return value[:idx], value[idx:]
+}
+
+func trimScaledNumber(value string) string {
+	if !strings.Contains(value, ".") {
+		return value
+	}
+	value = strings.TrimRight(value, "0")
+	value = strings.TrimRight(value, ".")
+	if value == "-0" {
+		return "0"
+	}
+	return value
+}
+
+func displayUnit(prefix, unit string) string {
+	switch unit {
+	case "sec":
+		switch prefix {
+		case "n":
+			return "ns"
+		case "µ":
+			return "us"
+		case "m":
+			return "ms"
+		case "":
+			return "s"
+		default:
+			return prefix + "s"
+		}
+	case "B":
+		return prefix + "B"
+	default:
+		return prefix + unit
+	}
 }
 
 func formatRatio(value float64) string {

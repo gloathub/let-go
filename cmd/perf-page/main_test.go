@@ -1,6 +1,12 @@
 package main
 
-import "testing"
+import (
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestSplitBenchmarkName(t *testing.T) {
 	pkg, name := splitBenchmarkName("github.com/nooga/let-go/pkg/vm.BenchmarkFuncInvoke/Direct")
@@ -22,14 +28,14 @@ func TestSplitBenchmarkName(t *testing.T) {
 
 func TestCompareWithHistorical(t *testing.T) {
 	current := Baseline{Benchmarks: map[string]BenchmarkEntry{
-		"pkg.BenchmarkA": {Ratio: 80},
-		"pkg.BenchmarkB": {Ratio: 120},
-		"pkg.BenchmarkC": {Ratio: 50},
+		"pkg.BenchmarkA": {RatioToAnchor: 80},
+		"pkg.BenchmarkB": {RatioToAnchor: 120},
+		"pkg.BenchmarkC": {RatioToAnchor: 50},
 	}}
 	reference := Baseline{Benchmarks: map[string]BenchmarkEntry{
-		"pkg.BenchmarkA": {Ratio: 100},
-		"pkg.BenchmarkB": {Ratio: 100},
-		"pkg.BenchmarkD": {Ratio: 10},
+		"pkg.BenchmarkA": {RatioToAnchor: 100},
+		"pkg.BenchmarkB": {RatioToAnchor: 100},
+		"pkg.BenchmarkD": {RatioToAnchor: 10},
 	}}
 
 	changes, summary := compare(current, reference)
@@ -65,14 +71,14 @@ func TestBuildCharts(t *testing.T) {
 			CapturedAt:    "2026-06-01T00:00:00Z",
 			CapturedAtSHA: "aaaaaaaaaaaa",
 			Benchmarks: map[string]BenchmarkEntry{
-				"github.com/nooga/let-go/test.BenchmarkClojureTestSuite [bytecode]": {Ratio: 100, AllocsPerOp: 10, BytesPerOp: 1000},
+				"github.com/nooga/let-go/test.BenchmarkClojureTestSuite [bytecode]": {RatioToAnchor: 100, AllocsPerOp: 10, BytesPerOp: 1000},
 			},
 		}),
 		makeSnapshot("b", Baseline{
 			CapturedAt:    "2026-06-02T00:00:00Z",
 			CapturedAtSHA: "bbbbbbbbbbbb",
 			Benchmarks: map[string]BenchmarkEntry{
-				"github.com/nooga/let-go/test.BenchmarkClojureTestSuite [bytecode]": {Ratio: 80, AllocsPerOp: 9, BytesPerOp: 900},
+				"github.com/nooga/let-go/test.BenchmarkClojureTestSuite [bytecode]": {RatioToAnchor: 80, AllocsPerOp: 9, BytesPerOp: 900},
 			},
 		}),
 	}
@@ -114,6 +120,48 @@ func TestFormatNS(t *testing.T) {
 		if got := formatNS(input); got != want {
 			t.Fatalf("formatNS(%v) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestLoadTimelineSkipsCorruptSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	timelineDir := filepath.Join(dir, "timeline")
+	historicalDir := filepath.Join(dir, "historical")
+	if err := os.MkdirAll(timelineDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(historicalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	good := `{"version":1,"captured_at":"2026-06-01T00:00:00Z","captured_at_sha":"abc","benchmarks":{"pkg.BenchmarkA":{"ns_per_op":1,"ratio_to_anchor":2}}}`
+	if err := os.WriteFile(filepath.Join(timelineDir, "good.json"), []byte(good), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(timelineDir, "bad.json"), []byte(`{"version":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr strings.Builder
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	snapshots, err := loadTimeline(timelineDir, historicalDir, Baseline{})
+	_ = w.Close()
+	os.Stderr = oldStderr
+	if _, copyErr := io.Copy(&stderr, r); copyErr != nil {
+		t.Fatal(copyErr)
+	}
+	if err != nil {
+		t.Fatalf("loadTimeline returned error: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshot count = %d, want 1", len(snapshots))
+	}
+	if !strings.Contains(stderr.String(), "skipping") {
+		t.Fatalf("stderr = %q, want skip warning", stderr.String())
 	}
 }
 
