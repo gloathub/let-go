@@ -180,18 +180,46 @@
             sym
             (recur (next remaining))))))))
 
+(def ^:private gensym-digit-set #{\0 \1 \2 \3 \4 \5 \6 \7 \8 \9})
+
+(defn- split-gensym
+  "Split a gensym-shaped name \"<prefix>__<digits>\" into
+   [\"<prefix>__\" \"<digits>\"]. Returns nil when s does not end in a run
+   of digits preceded by \"__\". The trailing number is the process-global
+   gensym counter (non-deterministic across regens); the prefix is the
+   semantic part we keep."
+  [s]
+  (let [n (count s)]
+    (loop [i n]
+      (if (and (> i 0) (contains? gensym-digit-set (nth s (dec i))))
+        (recur (dec i))
+        (when (and (< i n) (>= i 2)
+                   (= \_ (nth s (dec i)))
+                   (= \_ (nth s (- i 2))))
+          [(subs s 0 i) (subs s i)])))))
+
+(defn- canonical-name
+  "Map a raw source name to its per-function canonical form via the
+   :gensym-renames table (built by gensym-renumber-map and cached on f).
+   Non-gensym names, and any name absent from the table, pass through
+   unchanged. This is what strips the process-global gensym counter out of
+   emitted Go identifiers so lowering output is reproducible across regens."
+  [f s]
+  (get (:gensym-renames (deref f)) s s))
+
 (defn- value-name
   "Go identifier for inst nid. Prefers the user-visible source name when
    one is attached via a name-only SourceInfo (suffix `_<nid>` preserves
    uniqueness across shadowing — multiple SSA insts can share a source
    symbol, but each gets its own Go local). Falls back to `v<nid>` when
-   no name is attached."
+   no name is attached. Gensym-derived source names are canonicalized so
+   their process-global counter does not leak into the Go identifier."
   ([nid] (str "v" nid))
   ([f nid]
    (or (when-let [cm (:coalesce (deref f))]
          (get cm nid))
        (when-let [sym (source-name-of f nid)]
-         (str (go-name sym) "_" nid))
+         (str (go-name (canonical-name f sym)) "_" nid))
        (str "v" nid))))
 
 ;; Munge Lisp-idiomatic identifier chars to a valid Go identifier.
@@ -1190,6 +1218,29 @@
       (= op :branch-if) [(ir/cond-target-true aux) (ir/cond-target-false aux)]
       :else             [])))
 
+(defn- gensym-renumber-map [f]
+  ;; {raw-source-name canonical-name}: per-function dense renumbering of
+  ;; gensym-suffixed source names (<prefix>__<globalN> -> <prefix>__<ordinal>)
+  ;; by deterministic first-occurrence order (oos-all-nids traverses
+  ;; blocks->params->insts in structural order; nids are build-deterministic).
+  ;; Removes the process-global gensym counter from emitted Go identifiers.
+  ;; The map is injective per function (distinct raw names within a prefix get
+  ;; distinct ordinals; prefixes differ across name families), so applying it
+  ;; only at final identifier emission preserves every coalescing decision the
+  ;; safety analysis made on raw names. Non-gensym names are not included.
+  (let [renames  (atom {})
+        counters (atom {})]
+    (doseq [nid (oos-all-nids f)]
+      (let [s (source-name-of f nid)]
+        (when (and (string? s) (pos? (count s))
+                   (not (contains? @renames s)))
+          (when-let [parts (split-gensym s)]
+            (let [prefix (first parts)
+                  k      (get @counters prefix 1)]
+              (swap! counters assoc prefix (inc k))
+              (swap! renames assoc s (str prefix k)))))))
+    @renames))
+
 (defn- coalesce-map [f]
   ;; {nid go-name} for every nid whose source name is safe to coalesce; all
   ;; same-named versions map to the one bare name. Absent nids fall through to
@@ -1206,13 +1257,37 @@
                                                   (go-type-spec (ir/type-of nid f))))
                                  m)))
                            {}
-                           nids)]
+                           nids)
+        ;; Collision guard: two DISTINCT source names can munge to the SAME Go
+        ;; identifier — go-name maps '-' -> '_', so a real `x--1` and a gensym
+        ;; canonical `x__1` collide. Coalescing both onto one bare name would
+        ;; alias unrelated live values. Detect deterministically (first claimant
+        ;; by nid order keeps the name); the rest are dropped here and versioned
+        ;; via value-name's `_<nid>` path — making naming collision-free by
+        ;; construction. (Reusing a *dead* loser's slot via reassignment instead
+        ;; of versioning would be tighter, but needs a last-use/liveness analysis
+        ;; the OOS pass intentionally omits — a follow-up, not a correctness need.)
+        conflicted (let [owner (atom {}) bad (atom #{})]
+                     (doseq [nid nids]
+                       (let [s (source-name-of f nid)]
+                         (when (and (string? s) (pos? (count s))
+                                    (not (contains? unsafe s))
+                                    (= 1 (count (get name-types s))))
+                           (let [gn (go-name (canonical-name f s))]
+                             (when (and (pos? (count gn)) (not= "_" gn))
+                               (let [o (get @owner gn)]
+                                 (cond
+                                   (nil? o) (swap! owner assoc gn s)
+                                   (= o s)  nil
+                                   :else    (swap! bad conj s))))))))
+                     @bad)]
     (reduce (fn [result nid]
               (let [s (source-name-of f nid)]
                 (if (and (string? s) (pos? (count s))
                          (not (contains? unsafe s))
+                         (not (contains? conflicted s))
                          (= 1 (count (get name-types s))))
-                  (let [gn (go-name s)]
+                  (let [gn (go-name (canonical-name f s))]
                     ;; never coalesce to the Go blank identifier or an empty
                     ;; name; those fall through to versioned naming (valid).
                     (if (and (pos? (count gn)) (not= "_" gn))
@@ -1359,6 +1434,7 @@
    (swap! f assoc :param-sources (compute-param-sources f))
    (swap! f assoc :closure-memo (atom {}))
    (swap! f assoc :const-params (const-param-map f))
+   (swap! f assoc :gensym-renames (gensym-renumber-map f))
    (swap! f assoc :coalesce (coalesce-map f))
    (swap! f assoc :live (live-nids f))
    (let [needs-error? (function-needs-error? f)

@@ -40,8 +40,13 @@ func BenchmarkPrograms(b *testing.B) {
 			}
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				fr := vm.NewFrame(chunk, nil)
-				fr.Run()
+				func() {
+					fr := vm.NewFrame(chunk, nil)
+					defer vm.ReleaseFrame(fr)
+					if _, err := fr.Run(); err != nil {
+						b.Fatalf("run %s: %v", name, err)
+					}
+				}()
 			}
 		})
 	}

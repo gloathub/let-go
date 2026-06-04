@@ -86,7 +86,7 @@ the thread — not a silent override.
 | Artifact-size regression | > 10 % on any surface | perf corpus, `test/perf/` (in flight) |
 | Bootstrap parity divergence | any count/bucket delta | `make parity-full` — local target, CI wiring deferred (see note below) |
 | Stale `core_compiled.lgb` | committed bytes differ from regeneration | `make check-generated` — CI gate |
-| Stale `core_go_lowered/` | committed tree fails to compile under `-tags gogen_ir` | `make check-generated` — CI gate |
+| Broken `core_go_lowered/` | freshly regenerated (gitignored) tree fails to compile under `-tags gogen_ir` | `make check-generated` — CI gate |
 | Existing test suite | any regression | `make test` — CI gate (already in place) |
 
 **Why `parity-full` isn't yet a CI gate.** Wiring it requires
@@ -96,13 +96,16 @@ EOF. The fix lands in a follow-up; until then the policy describes the
 target end-state but CI only enforces the staleness gates that protect
 the artifacts `parity-full` depends on.
 
-The two staleness gates are siblings. `core_compiled.lgb` is the bytecode
-bundle loaded by the untagged build; `core_go_lowered/` is the generated
-Go linked into `-tags gogen_ir` builds. Both derive from
-`pkg/rt/core/**/*.lg`. If either falls behind the sources, the two engines
-quietly run different versions of the IR pipeline — `parity-full` then
-diverges on bucket hashes even when pass/fail counts match. Caught the
-hard way 2026-05-28.
+The two gates are siblings, but checkpointed differently. `core_compiled.lgb`
+is the bytecode bundle loaded by the untagged build — it is **committed**, so
+its gate compares committed bytes against a fresh regeneration. `core_go_lowered/`
+is the generated Go linked into `-tags gogen_ir` builds — it is a **gitignored
+artifact**, regenerated from scratch by the gate, which then verifies it compiles
+under `-tags gogen_ir` (no committed-bytes comparison). Both derive from
+`pkg/rt/core/**/*.lg`. If the committed bundle falls behind the sources, or the
+lowered tree fails to regenerate-and-compile, the two engines quietly run
+different versions of the IR pipeline — `parity-full` then diverges on bucket
+hashes even when pass/fail counts match. Caught the hard way 2026-05-28.
 
 `make parity-full` runs `scripts/gogen-parity.sh --full`, covering:
 1. clojure-test-suite (jank) — end-user-observable `clojure.core`
@@ -214,9 +217,9 @@ The default `lg` binary stays lean.
 
 `make check-generated` and `make parity-full` run on every PR via
 `.github/workflows/go.yml`. The generated-artifacts check regenerates
-the bundle and fails if the committed bytes differ, and verifies the
-committed lowered tree compiles under `-tags gogen_ir`; it fails the
-build with an explicit remediation message. The parity
+the bundle and fails if the committed bytes differ, then regenerates the
+gitignored lowered tree and verifies it compiles under `-tags gogen_ir`;
+it fails the build with an explicit remediation message. The parity
 check is the longer gate (~5 min) but is what guarantees the
 self-host substrate keeps working.
 
