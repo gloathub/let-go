@@ -1,3 +1,24 @@
+---
+status: active
+last-verified: 2026-06-05
+authoritative-for:
+  - persistent-collections
+  - seq-tower
+  - transients
+  - transducers
+  - equality-hashing
+shipped:
+  - Phase 1 PersistentVector (BPTR) — pkg/vm/persistent_vector.go
+  - Phase 1 TransientVector + transient builtins (`transient`, `persistent!`, `conj!`, `assoc!`, `pop!`) — pkg/rt/lang.go:4410
+  - Phase 2 PersistentHashMap (HAMT) + transient variant — pkg/vm/persistent_map.go
+  - Phase 2 PersistentHashSet + transient variant
+  - Phase 3 Hashable interface and Equiv/Hash on core value types — pkg/vm/hash.go:15
+remaining-open:
+  - Phase 4 transducers (`transduce`, `eduction`, `sequence`, `completing`)
+  - Phase 4 ChunkedSeq + Reducible fast path
+human-verified: 2026-06-07
+---
+
 ## Clojure-like collections, seq tower, transients and transducers — Refactor Plan
 
 This document captures the plan to refactor VM data structures and core APIs to better align with Clojure semantics while minimizing breakage. It covers: current gaps, target interface hierarchy (seq tower), persistent data structures, transients, transducers, migration steps, tests, and risks.

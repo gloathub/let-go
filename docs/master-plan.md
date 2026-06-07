@@ -1,12 +1,13 @@
 ---
 status: active
-last-verified: 2026-06-01
+last-verified: 2026-06-05
 authoritative-for:
   - phase-skeleton
   - success-metrics
   - cross-cutting-benchmarks-and-ci
 superseded-by:
   - contribution-policy.md (on direction — Phase 7 Go AOT is the committed deployment path, not optional)
+human-verified: 2026-06-07
 ---
 
 ## let-go master plan — fastest and most useful Clojure-on-Go

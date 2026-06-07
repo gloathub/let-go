@@ -1,6 +1,6 @@
 ---
 status: active
-last-verified: 2026-06-01
+last-verified: 2026-06-05
 authoritative-for:
   - design-contracts
   - regression-checkpoints
@@ -10,6 +10,7 @@ authoritative-for:
   - wasm-constraints
 supersedes:
   - master-plan.md (on direction — self-host as committed direction, gogen_ir as deployment path)
+human-verified: 2026-06-07
 ---
 
 # Contribution policy

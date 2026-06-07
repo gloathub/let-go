@@ -1,3 +1,11 @@
+---
+status: active
+last-verified: 2026-06-05
+authoritative-for:
+  - docs-index
+human-verified: 2026-06-07
+---
+
 # let-go docs
 
 Design plans, execution roadmaps, and policy for the let-go implementation. Each doc carries a `status:` frontmatter line indicating whether it's the current authority or has been superseded. See "What's current" below.
@@ -47,14 +55,17 @@ Every doc carries frontmatter:
 ---
 status: planning | active | shipped | superseded | archived
 last-verified: YYYY-MM-DD
-supersedes: [...]       # optional
-superseded-by: [...]    # optional
-shipped: [...]          # optional, for partial-shipped docs
-remaining-open: [...]   # optional, for partial-shipped docs
+supersedes: [...]         # optional
+superseded-by: [...]      # optional
+shipped: [...]            # optional, for partial-shipped docs
+remaining-open: [...]     # optional, for partial-shipped docs
 authoritative-for: [...]  # optional, used by this index
+human-verified:           # optional, set only by explicit human action
 ---
 ```
 
 `status` describes the *doc*, not the underlying work. A doc that proposed a feature can stay `active` after the feature ships if it's still the authority on the design rationale; the shipped items move to a `shipped:` list and the doc itself carries forward.
 
 When a feature ships, add a dated `Shipped:` annotation in the relevant section of the doc body, pointing at the commit or PR. The doc stays in place; the status updates. When a newer doc takes over on a topic, link the supersession in both directions via the frontmatter rather than deleting the older doc.
+
+`human-verified` carries the date a human reader last vouched for the doc as current. It's intentionally distinct from `last-verified` (which an automated maintenance pass refreshes on every touch) so a reader can see at a glance whether a human, or just tooling, last attested to the doc. Leave it blank if no human has reviewed the doc yet; populate it only by explicit human action.

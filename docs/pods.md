@@ -1,3 +1,18 @@
+---
+status: active
+last-verified: 2026-06-05
+authoritative-for:
+  - pods-design
+shipped:
+  - load-pod / invoke registered in `pods` and `babashka.pods` namespaces (pkg/rt/pods.go:688)
+  - Stdio transport with EDN encode/decode and request/response routing (pkg/rt/pods.go)
+remaining-open:
+  - CLI helpers (`lg pods describe`, `lg pods run`)
+  - TCP transport
+  - Streaming and binary/transit encoding (stretch goals)
+human-verified: 2026-06-07
+---
+
 ## Pods — Babashka-compatible external process integration
 
 This document proposes implementing Babashka-compatible pods to provide an industrial-strength extension mechanism without relying on Go plugins. Pods are external processes speaking a simple EDN-based RPC over stdio (or TCP). let-go will act as a host, enabling script-friendly access to system APIs, databases, and tools while staying safe and portable.
