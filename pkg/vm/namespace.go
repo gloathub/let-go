@@ -10,6 +10,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 )
 
 type theNamespaceType struct{}
@@ -34,6 +35,9 @@ func SetNSLookup(fn func(string) *Namespace) {
 	nsLookup = fn
 }
 
+// Refer entries are immutable once constructed and inserted, so their fields
+// (ns, all, only) may be read without holding the owning namespace's lock —
+// only the refers MAP itself is mutex-guarded.
 type Refer struct {
 	ns   *Namespace
 	all  bool
@@ -41,7 +45,13 @@ type Refer struct {
 }
 
 type Namespace struct {
-	name     string
+	// mu guards the four maps below. Governing invariant: NEVER hold one
+	// namespace's lock while acquiring another's. Cross-namespace reads
+	// (Lookup/Def/FuzzySymbolLookup) snapshot or use the target's own brief
+	// accessors, so no lock is ever held across another lock acquisition —
+	// the lock graph has no cycles (writers only lock their own namespace).
+	mu       sync.RWMutex
+	name     string // immutable after construction; Name() is lock-free
 	registry map[Symbol]*Var
 	refers   map[Symbol]*Refer
 	aliases  map[Symbol]*Namespace
@@ -58,15 +68,72 @@ func SetCoreNamespace(ns *Namespace) {
 	coreNamespacePtr = ns
 }
 
+// --- brief single-op locked accessors -------------------------------------
+// Each takes its own lock for exactly one map op and returns a copy/pointer,
+// never a live map reference, so callers never iterate an unguarded map.
+
+// localVar reads the namespace's own registry. nil when absent.
+func (n *Namespace) localVar(s Symbol) *Var {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.registry[s]
+}
+
+// aliasFor reads the namespace's own aliases.
+func (n *Namespace) aliasFor(s Symbol) (*Namespace, bool) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	t, ok := n.aliases[s]
+	return t, ok
+}
+
+// referFor reads a single refer entry by key.
+func (n *Namespace) referFor(s Symbol) (*Refer, bool) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	r, ok := n.refers[s]
+	return r, ok
+}
+
+// refersSnapshot copies the refer pointers so callers can iterate (and follow
+// each refer's target namespace) without holding this namespace's lock — the
+// Refer values are immutable once inserted.
+func (n *Namespace) refersSnapshot() []*Refer {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	out := make([]*Refer, 0, len(n.refers))
+	for _, r := range n.refers {
+		out = append(out, r)
+	}
+	return out
+}
+
+// excludedLocked reports whether the symbol is in the exclude set.
+func (n *Namespace) excludedLocked(s Symbol) bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.excludes[s]
+}
+
+// cacheAlias rewrites an alias to its freshly-resolved target. Extracted from
+// Lookup so the write is a single guarded op rather than inline under a read.
+func (n *Namespace) cacheAlias(s Symbol, target *Namespace) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.aliases[s] = target
+}
+
 // Exclude marks a symbol as excluded from clojure.core auto-refer.
 // Called from the ns macro for :refer-clojure :exclude [...].
 func (n *Namespace) Exclude(name string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.excludes[Symbol(name)] = true
 }
 
 // IsExcluded reports whether the symbol is in the exclude set.
 func (n *Namespace) IsExcluded(name Symbol) bool {
-	return n.excludes[name]
+	return n.excludedLocked(name)
 }
 
 func (n *Namespace) Type() ValueType { return NamespaceType }
@@ -86,7 +153,11 @@ func NewNamespace(name string) *Namespace {
 	}
 }
 
-func (n *Namespace) RegistrySize() int { return len(n.registry) }
+func (n *Namespace) RegistrySize() int {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return len(n.registry)
+}
 
 // isShadowingCoreRefer reports whether name `s` is currently visible
 // unqualified in namespace `n` via a refer of clojure.core.
@@ -95,7 +166,7 @@ func (n *Namespace) RegistrySize() int { return len(n.registry) }
 // by symbol — so we look up that single entry, then check whether `s`
 // is in scope via :refer :all or :refer :only.
 func isShadowingCoreRefer(n *Namespace, s Symbol) bool {
-	for _, ref := range n.refers {
+	for _, ref := range n.refersSnapshot() {
 		if ref == nil || ref.ns != coreNamespacePtr {
 			continue
 		}
@@ -123,13 +194,15 @@ func (n *Namespace) Def(name string, val Value) *Var {
 	// Stdlib Go-side ns.Def calls (e.g. profile/reset!) build namespaces
 	// that don't auto-refer clojure.core, so they correctly stay silent.
 	// User code that uses the default (ns ...) form gets clojure.core
-	// auto-refered :all, so it does warn on shadow.
-	if coreNamespacePtr != nil && n != coreNamespacePtr && !n.excludes[s] {
+	// auto-refered :all, so it does warn on shadow. The check reads core's
+	// and this ns's maps via brief accessors (no lock held across the write
+	// below); the warning itself is best-effort so a benign TOCTOU is fine.
+	if coreNamespacePtr != nil && n != coreNamespacePtr && !n.excludedLocked(s) {
 		if isShadowingCoreRefer(n, s) {
-			if existing, ok := coreNamespacePtr.registry[s]; ok && existing != nil && !existing.isPrivate {
+			if existing := coreNamespacePtr.localVar(s); existing != nil && !existing.isPrivate {
 				// Only warn the first time we shadow in this ns; subsequent
 				// re-defs of our own var don't re-warn.
-				if _, alreadyDefined := n.registry[s]; !alreadyDefined {
+				if n.localVar(s) == nil {
 					fmt.Fprintf(os.Stderr,
 						"WARNING: %s already refers to: #'clojure.core/%s in namespace: %s, being replaced by: #'%s/%s\n",
 						name, name, n.name, n.name, name)
@@ -145,13 +218,15 @@ func (n *Namespace) Def(name string, val Value) *Var {
 	if f, ok := val.(*Func); ok {
 		f.SetName(name)
 	}
+	n.mu.Lock()
 	n.registry[s] = va
+	n.mu.Unlock()
 	return va
 }
 
 // LookupLocal checks only the namespace's own registry, not refers or aliases.
 func (n *Namespace) LookupLocal(symbol Symbol) *Var {
-	return n.registry[symbol]
+	return n.localVar(symbol)
 }
 
 // DefStub creates a var with NIL root without triggering the warn-on-shadow
@@ -163,55 +238,61 @@ func (n *Namespace) DefStub(name string) *Var {
 	s := Symbol(name)
 	va := NewVar(n, n.name, name)
 	va.SetRoot(NIL)
+	n.mu.Lock()
 	n.registry[s] = va
+	n.mu.Unlock()
 	return va
 }
 
 func (n *Namespace) LookupOrAdd(symbol Symbol) Value {
-	val, ok := n.registry[symbol]
-	if !ok {
-		// Intern an UNBOUND var (no root) rather than Def(NIL): the compiler
-		// calls this while compiling a `(def x v)` form before it runs, and
-		// `defonce` must be able to tell that interned-but-unrun state from a
-		// var that has actually been assigned. Deref still yields NIL.
-		va := NewVar(n, n.name, string(symbol))
-		n.registry[symbol] = va
-		return va
+	if v := n.localVar(symbol); v != nil {
+		return v
 	}
-	return val
+	// Intern an UNBOUND var (no root) rather than Def(NIL): the compiler
+	// calls this while compiling a `(def x v)` form before it runs, and
+	// `defonce` must be able to tell that interned-but-unrun state from a
+	// var that has actually been assigned. Deref still yields NIL.
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	// Re-check under the write lock: a concurrent LookupOrAdd may have
+	// interned it between our RLock read and acquiring the Lock.
+	if v, ok := n.registry[symbol]; ok {
+		return v
+	}
+	va := NewVar(n, n.name, string(symbol))
+	n.registry[symbol] = va
+	return va
 }
 
 func (n *Namespace) Lookup(symbol Symbol) Value {
 	sns, sym := symbol.Namespaced()
 	if sns == NIL {
-		v := n.registry[sym.(Symbol)]
-		if v == nil {
-			for _, ref := range n.refers {
-				v = ref.ns.registry[sym.(Symbol)]
-				if v != nil {
-					if v.isPrivate {
-						return NIL
-					}
-					return v
+		if v := n.localVar(sym.(Symbol)); v != nil {
+			return v
+		}
+		// Unqualified miss: search refers. Snapshot first so we follow each
+		// refer's target via its own lock, never holding n's lock across.
+		for _, ref := range n.refersSnapshot() {
+			if v := ref.ns.localVar(sym.(Symbol)); v != nil {
+				if v.isPrivate {
+					return NIL
 				}
+				return v
 			}
 		}
-		if v == nil {
-			return NIL
-		}
-		return v
+		return NIL
 	}
 	// Alias-qualified resolution via aliases
-	if target, ok := n.aliases[sns.(Symbol)]; ok {
-		v := target.registry[sym.(Symbol)]
+	if target, ok := n.aliasFor(sns.(Symbol)); ok {
+		v := target.localVar(sym.(Symbol))
 		if v == nil && nsLookup != nil {
 			// Alias may point to a placeholder namespace created before source
 			// load completed. Re-resolve by name so runtime loader can
 			// materialize the namespace on demand, then retry the symbol lookup.
 			if loaded := nsLookup(target.Name()); loaded != nil {
 				target = loaded
-				n.aliases[sns.(Symbol)] = loaded
-				v = target.registry[sym.(Symbol)]
+				n.cacheAlias(sns.(Symbol), loaded)
+				v = target.localVar(sym.(Symbol))
 			}
 		}
 		if v == nil || v.isPrivate {
@@ -222,7 +303,7 @@ func (n *Namespace) Lookup(symbol Symbol) Value {
 	// Fallback: direct namespace lookup from global registry
 	if nsLookup != nil {
 		if target := nsLookup(string(sns.(Symbol))); target != nil {
-			v := target.registry[sym.(Symbol)]
+			v := target.localVar(sym.(Symbol))
 			// A private var is visible to a fully-qualified reference only from
 			// within its own namespace — `my.ns/-priv` is legal inside my.ns
 			// (e.g. a macro that expands to a qualified call to a private helper
@@ -233,8 +314,8 @@ func (n *Namespace) Lookup(symbol Symbol) Value {
 		}
 	}
 	// Fallback via refers
-	if refer, ok := n.refers[sns.(Symbol)]; ok {
-		v := refer.ns.registry[sym.(Symbol)]
+	if refer, ok := n.referFor(sns.(Symbol)); ok {
+		v := refer.ns.localVar(sym.(Symbol))
 		if v == nil || v.isPrivate {
 			return NIL
 		}
@@ -256,6 +337,8 @@ func (n *Namespace) Refer(ns *Namespace, alias string, all bool) {
 	if alias != "" {
 		nom = alias
 	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.refers[Symbol(nom)] = &Refer{
 		all:  all,
 		ns:   ns,
@@ -269,6 +352,8 @@ func (n *Namespace) ReferList(ns *Namespace, symbols []Symbol) {
 	for _, s := range symbols {
 		set[s] = true
 	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.refers[Symbol(ns.Name())] = &Refer{
 		ns:   ns,
 		all:  false,
@@ -278,23 +363,28 @@ func (n *Namespace) ReferList(ns *Namespace, symbols []Symbol) {
 
 // Alias creates a symbol alias to another namespace in this namespace.
 func (n *Namespace) Alias(alias Symbol, target *Namespace) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.aliases[alias] = target
 }
 
 // ImportVar links a var from another namespace into this namespace under the given alias.
 // Returns true when the var exists and is not private.
 func (n *Namespace) ImportVar(from *Namespace, name Symbol, alias Symbol) bool {
-	v := from.registry[name]
+	v := from.localVar(name)
 	if v == nil || v.isPrivate {
 		return false
 	}
+	n.mu.Lock()
 	n.registry[alias] = v
+	n.mu.Unlock()
 	return true
 }
 
 // ResolveAlias returns the namespace for the given alias, or nil.
 func (n *Namespace) ResolveAlias(alias Symbol) *Namespace {
-	return n.aliases[alias]
+	t, _ := n.aliasFor(alias)
+	return t
 }
 
 func (n *Namespace) Name() string {
@@ -305,14 +395,26 @@ func (n *Namespace) String() string {
 	return fmt.Sprintf("<ns %s>", n.Name())
 }
 
+// registrySnapshot copies the registry so FuzzySymbolLookup can scan it (and
+// recurse into refers) without holding the lock across other-namespace reads.
+func (n *Namespace) registrySnapshot() map[Symbol]*Var {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	out := make(map[Symbol]*Var, len(n.registry))
+	for k, v := range n.registry {
+		out[k] = v
+	}
+	return out
+}
+
 func FuzzySymbolLookup(ns *Namespace, s Symbol, lookupPrivate bool) []Symbol {
 	ret := []Symbol{}
-	for _, r := range ns.refers {
+	for _, r := range ns.refersSnapshot() {
 		ret = append(ret, FuzzySymbolLookup(r.ns, s, false)...)
 	}
-	for k := range ns.registry {
+	for k, v := range ns.registrySnapshot() {
 		if strings.HasPrefix(string(k), string(s)) {
-			if ns.registry[k].isPrivate && !lookupPrivate {
+			if v.isPrivate && !lookupPrivate {
 				continue
 			}
 			ret = append(ret, k)
