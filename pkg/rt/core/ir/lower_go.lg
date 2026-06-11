@@ -921,6 +921,35 @@
         :param-specs (vec (repeat (:arity result) "vm.Value"))
         :result-spec "vm.Value" :native? false :go-pkg nil}})))
 
+(defn resolve-registry-entry
+  "Deterministically resolve ONE *lowered-registry* entry for a call to
+   `name-str` at `arity`. `ns-sym` is the call's (already internalized)
+   namespace symbol, or nil for an unqualified call.
+
+   This is the pure core of lookup-direct-callable. The old matcher used
+   `(some (get) (filter … (keys registry)))` — first match in HASH-KEY
+   order — so an unqualified call that collides with a seeded native
+   (same name+arity, e.g. an own-ns sibling vs clojure.core from
+   native_direct_install.go) resolved differently across regens. That is
+   the #188 non-determinism that intermittently drops a func definition
+   under -tags gogen_ir.
+
+   We instead unify the call key against the registry keys with an
+   explicit precedence: a qualified call binds its ns exactly (at most one
+   key); an unqualified call leaves ns free, and we bind it preferring the
+   non-native (own-ns) entry, then the lexicographically-smallest ns. The
+   result is a pure function of registry CONTENT, never key iteration
+   order — which is what makes the lowered tree reproducible."
+  [registry ns-sym name-str arity]
+  (let [match? (fn [[kns kname karity]]
+                 (and (= kname name-str) (= karity arity)
+                      (or (nil? ns-sym) (= ns-sym kns))))
+        rank   (fn [k]
+                 (str (if (:native? (get registry k)) "1" "0") (first k)))
+        ks     (sort-by rank (filter match? (keys registry)))]
+    (when-let [k (first ks)]
+      (get registry k))))
+
 (defn- coerce-arg-to-type
   "Emit a Go expression that produces a value of `target-type` from
    arg id `rid`. If typeinfer already typed rid as the matching Go
@@ -1059,11 +1088,9 @@
           ;; Pass-2 the registry holds that ns's siblings plus native
           ;; modules, so an unqualified call (ns-sym nil) matches its
           ;; own sibling, and a qualified call matches the named ns.
-          ks     (filter (fn [[kns kname karity]]
-                           (and (= kname (name sym)) (= karity arg-count)
-                                (or (nil? ns-sym) (= ns-sym kns))))
-                         (keys *lowered-registry*))
-          entry  (some (fn [k] (get *lowered-registry* k)) ks)]
+          ;; resolve-registry-entry picks ONE deterministically (own-ns
+          ;; non-native preferred) — never hash-key order.
+          entry  (resolve-registry-entry *lowered-registry* ns-sym (name sym) arg-count)]
       (when (and entry
                  (not (:variadic? entry))
                  ;; Param + result types must be coercion-supported;

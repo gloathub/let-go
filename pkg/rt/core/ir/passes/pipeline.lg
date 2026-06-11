@@ -244,9 +244,15 @@
         sorted-forms (mapv keyed sorted-ks)
         deps-fn   (fn [form]
                     (let [self-name (first (defn-key form))]
-                      (filterv (fn [n] (and (not= n self-name)
-                                            (own-names n)))
-                               (collect-call-targets form))))
+                      ;; SORT the deps: collect-call-targets returns a hash-SET,
+                      ;; so filtering it yields hash-ordered (run-varying) deps.
+                      ;; toposort appends deps in iteration order (post-order),
+                      ;; so unsorted deps flip the emitted function order across
+                      ;; processes on acyclic namespaces. A stable dep order pairs
+                      ;; with graph/toposort's sorted DFS roots for full determinism.
+                      (vec (sort (filter (fn [n] (and (not= n self-name)
+                                                      (own-names n)))
+                                         (collect-call-targets form))))))
         topo (g/toposort-by (fn [form] (first (defn-key form)))
                             sorted-forms
                             deps-fn)
@@ -396,7 +402,14 @@
    Go source for a package. pkg-name is the Go package name string,
    ns-name is the namespace symbol (for *ns* binding), and defn-forms is
    a vector of raw (defn ...) list forms."
-  (binding [*ns* (the-ns ns-name)]
+  ;; Determinism: the Go-lowering path encodes inferred types into the
+  ;; rendered source, so typeinfer MUST run to fixpoint here — a wall-clock
+  ;; budget would yield a partial, time-dependent result (non-deterministic
+  ;; tree, and :bottom-heavy partials that drop forms → undefined: builds).
+  ;; The monotone lattice has finite height, so unbounded execution always
+  ;; terminates; it's just slower than the interactive/bytecode default.
+  (binding [*ns* (the-ns ns-name)
+            ir.passes.typeinfer/*typeinfer-budget-ms* nil]
     (let [defn-forms (order-defn-forms defn-forms)
           ;; Pass 1 discovers lowered single-arity vm.Value-uniform siblings
           ;; (:override-eligible?) — the intra-ns calls slice 1 can lift.
