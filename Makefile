@@ -207,9 +207,10 @@ install-hooks:
 # This is the gate CI runs. After a merge/rebase touching pkg/rt/core/**, run
 # `make check-generated` (or `make generate` to refresh, then commit).
 check-generated: $(GO)
-	@echo ">> bundle: regenerate + verify lockstep (content-based, VCS-agnostic)"
+	@echo ">> regenerate bundle + lowered tree from a SINGLE core compile (--target=both)"
 	@cp pkg/rt/core_compiled.lgb pkg/rt/.core_compiled.lgb.committed
-	@go run -tags bootstrap ./cmd/lgbgen >/dev/null
+	@go run -tags bootstrap ./cmd/lgbgen --target=both >/dev/null
+	@echo ">> bundle: verify lockstep (content-based, VCS-agnostic)"
 	@if cmp -s pkg/rt/core_compiled.lgb pkg/rt/.core_compiled.lgb.committed; then \
 		rm -f pkg/rt/.core_compiled.lgb.committed; \
 		echo "OK: core_compiled.lgb in lockstep with the .lg sources."; \
@@ -219,8 +220,7 @@ check-generated: $(GO)
 		echo "       Run 'make generate' and commit the regenerated bundle."; \
 		exit 1; \
 	fi
-	@echo ">> lowered tree: regenerate (gitignored build artifact), then compile + dispatch natively under -tags gogen_ir"
-	@go run -tags bootstrap ./cmd/lgbgen --target=go >/dev/null
+	@echo ">> lowered tree: compile + dispatch natively under -tags gogen_ir"
 	@go build -tags gogen_ir ./...
 	@out=$$(printf '(require (quote ir.passes.dce)) (println "DCE-TYPE:" (type ir.passes.dce/dce))' \
 	        | go run -tags gogen_ir . /dev/stdin 2>&1); \
