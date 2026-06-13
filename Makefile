@@ -25,7 +25,17 @@ REPORT-SCRIPT := scripts/clojure_compat_report.sh
 GOMEMLIMIT ?= 2GiB
 GO-TEST-TIMEOUT ?= 60s
 
+# Export the heap cap to EVERY recipe's environment, not just `make test`.
+# The bootstrap/lowering targets (generate, lowered, parity) shell out to
+# `go run -tags bootstrap` / `go test`, which compile the whole .lg stdlib
+# from source and balloon the heap; uncapped, parallel invocations OOM a
+# 16GB machine. `export` makes GOMEMLIMIT visible to those go subprocesses
+# too. Sub-make/scripts inherit it unless they override.
+export GOMEMLIMIT
+
 # Standard flags + env for `go test`. Use as: $(GO-TEST-ENV) go test $(GO-TEST-FLAGS) ./...
+# GO-TEST-ENV is retained for explicitness at test call sites; the value is
+# already exported above, so it is now belt-and-suspenders.
 GO-TEST-ENV := GOMEMLIMIT=$(GOMEMLIMIT)
 GO-TEST-FLAGS := -timeout $(GO-TEST-TIMEOUT)
 
