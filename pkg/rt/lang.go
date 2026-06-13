@@ -1022,6 +1022,68 @@ func isNilValue(v vm.Value) bool {
 	return v == nil || v == vm.NIL
 }
 
+// strReplaceCallback adapts a let-go replacement fn to the Go callback used by
+// (*vm.Regex).ReplaceAllFunc. Per clojure.string/replace semantics, the fn is
+// called with the whole match (a String) when the pattern has no capture
+// groups, or a vector [whole g1 g2 ...] when it does (nil for groups that did
+// not participate). The fn must return a String.
+func strReplaceCallback(fn vm.Fn) func(groups []string, present []bool) (string, error) {
+	return func(groups []string, present []bool) (string, error) {
+		var arg vm.Value
+		if len(groups) <= 1 {
+			arg = vm.String(groups[0])
+		} else {
+			elems := make([]vm.Value, len(groups))
+			for i := range groups {
+				if present[i] {
+					elems[i] = vm.String(groups[i])
+				} else {
+					elems[i] = vm.NIL
+				}
+			}
+			arg = vm.NewArrayVector(elems)
+		}
+		res, err := fn.Invoke([]vm.Value{arg})
+		if err != nil {
+			return "", err
+		}
+		rs, ok := res.(vm.String)
+		if !ok {
+			return "", fmt.Errorf("str-replace replacement function must return a String")
+		}
+		return string(rs), nil
+	}
+}
+
+// literalReplaceFn implements (str/replace s "lit" fn): a literal match with a
+// function replacement, called with the matched substring for each occurrence.
+func literalReplaceFn(lit, s string, fn vm.Fn, first bool) (vm.Value, error) {
+	if lit == "" {
+		return vm.String(s), nil
+	}
+	cb := strReplaceCallback(fn)
+	var b strings.Builder
+	for {
+		idx := strings.Index(s, lit)
+		if idx < 0 {
+			b.WriteString(s)
+			break
+		}
+		b.WriteString(s[:idx])
+		rep, err := cb([]string{lit}, []bool{true})
+		if err != nil {
+			return vm.NIL, err
+		}
+		b.WriteString(rep)
+		s = s[idx+len(lit):]
+		if first {
+			b.WriteString(s)
+			break
+		}
+	}
+	return vm.String(b.String()), nil
+}
+
 func isNaNValue(v vm.Value) bool {
 	if f, ok := v.(vm.Float); ok {
 		return math.IsNaN(float64(f))
@@ -3771,6 +3833,21 @@ func installLangNS() {
 		if !ok {
 			return vm.NIL, fmt.Errorf("str-replace expected String")
 		}
+		// Function replacement (clojure.string/replace semantics).
+		if fn, isFn := vs[2].(vm.Fn); isFn {
+			switch m := vs[1].(type) {
+			case *vm.Regex:
+				out, err := m.ReplaceAllFunc(string(s), strReplaceCallback(fn))
+				if err != nil {
+					return vm.NIL, err
+				}
+				return vm.String(out), nil
+			case vm.String:
+				return literalReplaceFn(string(m), string(s), fn, false)
+			default:
+				return vm.NIL, fmt.Errorf("str-replace expected String or Regex")
+			}
+		}
 		r, ok := vs[2].(vm.String)
 		if !ok {
 			return vm.NIL, fmt.Errorf("str-replace expected String")
@@ -3792,6 +3869,21 @@ func installLangNS() {
 		s, ok := vs[0].(vm.String)
 		if !ok {
 			return vm.NIL, fmt.Errorf("str-replace-first expected String")
+		}
+		// Function replacement (clojure.string/replace-first semantics).
+		if fn, isFn := vs[2].(vm.Fn); isFn {
+			switch m := vs[1].(type) {
+			case *vm.Regex:
+				out, err := m.ReplaceFirstFunc(string(s), strReplaceCallback(fn))
+				if err != nil {
+					return vm.NIL, err
+				}
+				return vm.String(out), nil
+			case vm.String:
+				return literalReplaceFn(string(m), string(s), fn, true)
+			default:
+				return vm.NIL, fmt.Errorf("str-replace-first expected String or Regex")
+			}
 		}
 		r, ok := vs[2].(vm.String)
 		if !ok {
