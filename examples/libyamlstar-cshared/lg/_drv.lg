@@ -1,0 +1,6 @@
+(ns _drv
+  (:require
+   [libyamlstar :as lib]))
+(println "VER:" (lib/yamlstar-version))
+(println "LOAD:" (lib/yamlstar-load "a: 1\nb: [x, y]\nc: true\nd: null" ""))
+(println "ALL:" (lib/yamlstar-load-all "---\nx: 1\n---\ny: 2\n" ""))

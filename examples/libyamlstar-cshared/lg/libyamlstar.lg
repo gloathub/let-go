@@ -1,0 +1,37 @@
+;; Entry namespace for the libyamlstar c-shared library (Stage A: bytecode-
+;; embedded). Mirrors yamlstar's gloat EXPORT wrapper, but returns raw Clojure
+;; DATA — JSON marshalling happens in Go at the C-ABI boundary (rt.MarshalJSON,
+;; backed by encoding/json), keeping JSON out of the lg/lowered layer.
+;;
+;; yamlstar-load / -load-all : YAML string -> {:data ...} or {:error ...}.
+;; yamlstar-version : () -> version string.
+(ns libyamlstar
+  (:require
+   [yamlstar.core :as yaml]))
+
+(defn nil-keys->string
+  "JSON forbids null object keys; turn nil map keys into the string \"null\"."
+  [x]
+  (cond
+    (map? x)        (into {} (map (fn [[k v]]
+                                    [(if (nil? k) "null" (nil-keys->string k))
+                                     (nil-keys->string v)])
+                                  x))
+    (vector? x)     (mapv nil-keys->string x)
+    (sequential? x) (map nil-keys->string x)
+    :else           x))
+
+(defn yamlstar-load [yaml-str _opts-json]
+  (try
+    {:data (nil-keys->string (yaml/load yaml-str))}
+    (catch e
+      {:error {:cause (str e) :type "Exception"}})))
+
+(defn yamlstar-load-all [yaml-str _opts-json]
+  (try
+    {:data (nil-keys->string (yaml/load-all yaml-str))}
+    (catch e
+      {:error {:cause (str e) :type "Exception"}})))
+
+(defn yamlstar-version []
+  (yaml/version))

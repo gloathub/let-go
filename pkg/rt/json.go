@@ -72,9 +72,17 @@ func fromMapValue(v vm.Value) (any, error) {
 			if e != nil {
 				return vm.NIL, vm.NewExecutionError("invalid VM value")
 			}
-			nk := k.String()
-			if k.Type() == vm.KeywordType {
-				nk = nk[1:]
+			// JSON object keys must be the raw key text. vm.String.String()
+			// returns the quoted/escaped pr-str form, which would
+			// double-quote string keys; use the underlying value instead.
+			var nk string
+			switch kk := k.(type) {
+			case vm.String:
+				nk = string(kk)
+			case vm.Keyword:
+				nk = string(kk)
+			default:
+				nk = k.String()
 			}
 			r[nk] = vv
 		}
@@ -131,6 +139,22 @@ func fromValue(v vm.Value) (any, error) {
 		}
 		return fromSeqValue(s)
 	}
+}
+
+// MarshalJSON converts a let-go value to a JSON string via the same
+// vm.Value->Go conversion the `json/write-json` builtin uses, then Go's
+// encoding/json. Exported for FFI/c-shared boundaries that marshal results
+// to JSON in Go rather than in the lg/lowered layer.
+func MarshalJSON(v vm.Value) (string, error) {
+	g, err := fromValue(v)
+	if err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(g)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 func optionsHaveKeywordize(opts vm.Value) (bool, error) {
