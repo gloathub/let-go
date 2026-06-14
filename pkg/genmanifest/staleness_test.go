@@ -1,0 +1,90 @@
+/*
+ * Copyright (c) 2026 Norman Nunley, Jr <nnunley@gmail.com>
+ * Part of the let-go project; see CONTRIBUTORS for full list of authors.
+ * SPDX-License-Identifier: MIT
+ */
+
+package genmanifest_test
+
+import (
+	"testing"
+
+	"github.com/nooga/let-go/pkg/genmanifest"
+)
+
+// TestGeneratedArtifactsAreFresh is the safety net: it fails in the
+// normal `go test ./...` / CI flow whenever a .lg or lgbgen source has
+// been edited without rerunning `make generate`. Content-based, so it
+// is reliable across git/jj checkouts (unlike the Makefile's
+// mtime-based check-*-fresh targets).
+func TestGeneratedArtifactsAreFresh(t *testing.T) {
+	root, err := genmanifest.FindRepoRoot(".")
+	if err != nil {
+		t.Fatalf("locate repo root: %v", err)
+	}
+
+	res, err := genmanifest.Check(root)
+	if err != nil {
+		t.Fatalf("compute manifest: %v", err)
+	}
+
+	if res.Recorded == "" {
+		t.Fatalf("manifest %s missing — %s", genmanifest.ManifestRelPath, genmanifest.Remediation)
+	}
+	if !res.Fresh {
+		t.Fatalf("generated artifacts are STALE relative to .lg/lgbgen sources.\n"+
+			"  recorded: %s\n  computed: %s\n%s",
+			res.Recorded, res.Computed, genmanifest.Remediation)
+	}
+}
+
+// TestComputeIsDeterministic guards the hashing core: two calls over an
+// unchanged tree must agree, otherwise the staleness test would flap.
+func TestComputeIsDeterministic(t *testing.T) {
+	root, err := genmanifest.FindRepoRoot(".")
+	if err != nil {
+		t.Fatalf("locate repo root: %v", err)
+	}
+	a, err := genmanifest.Compute(root)
+	if err != nil {
+		t.Fatalf("compute a: %v", err)
+	}
+	b, err := genmanifest.Compute(root)
+	if err != nil {
+		t.Fatalf("compute b: %v", err)
+	}
+	if a != b {
+		t.Fatalf("Compute not deterministic: %s != %s", a, b)
+	}
+	if len(a) != 64 {
+		t.Fatalf("expected 64-hex-char sha256 digest, got %q", a)
+	}
+}
+
+// TestSourceFilesCoversCoreAndLgbgen sanity-checks the input set: the
+// manifest is worthless if it silently stops covering the sources.
+func TestSourceFilesCoversCoreAndLgbgen(t *testing.T) {
+	root, err := genmanifest.FindRepoRoot(".")
+	if err != nil {
+		t.Fatalf("locate repo root: %v", err)
+	}
+	files, err := genmanifest.SourceFiles(root)
+	if err != nil {
+		t.Fatalf("list source files: %v", err)
+	}
+	var sawCoreLg, sawLgbgenGo bool
+	for _, f := range files {
+		if f == "pkg/rt/core/core.lg" {
+			sawCoreLg = true
+		}
+		if f == "cmd/lgbgen/main.go" {
+			sawLgbgenGo = true
+		}
+	}
+	if !sawCoreLg {
+		t.Errorf("expected pkg/rt/core/core.lg in source set; got %d files", len(files))
+	}
+	if !sawLgbgenGo {
+		t.Errorf("expected cmd/lgbgen/main.go in source set; got %d files", len(files))
+	}
+}

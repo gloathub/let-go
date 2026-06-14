@@ -1,0 +1,258 @@
+;; scripts/turnaround-ratchet.lg — generation turnaround gate (the "turnaround ratchet").
+;;
+;; Measures per-namespace lowering times and typeinfer budget bail counts from
+;; lgbgen's timing summary, comparing against a committed EDN baseline. Fails when
+;; typeinfer bails grow (ratchet only tightens) or total lowering time exceeds a
+;; percent-based budget. New namespaces are added; removed ones drop. The ratchet
+;; only tightens.
+;;
+;; Subcommands:  check | update | show
+;; Flags:
+;;   --go <path>           go binary for regeneration     (default "go")
+;;   --baseline <path>     baseline EDN                   (default "docs/perf/turnaround-baseline.edn")
+;;   --threshold <pct>     allowed time growth, int pct   (default "10")
+;;   --no-regen            skip regeneration (use --timing-file instead; for tests/fixtures)
+;;   --timing-file <path>  read timing summary from file  (test path only; requires --no-regen)
+;;   --strict              fail if total-bails > 0 (zero-tolerance; default is ratchet vs baseline)
+;;   --bails-only          run ONLY the bail ratchet (skip the machine-flaky time band)
+;;   --time-only           run ONLY the time band (skip the bail ratchet) — for the non-fatal CI alert
+
+(defn flag [argv name default]
+  (loop [xs argv]
+    (cond
+      (empty? xs)         default
+      (= (first xs) name) (second xs)
+      :else               (recur (rest xs)))))
+
+(defn has-flag? [argv name]
+  (loop [xs argv]
+    (cond
+      (empty? xs)         false
+      (= (first xs) name) true
+      :else               (recur (rest xs)))))
+
+(defn parse-bailed-fns [timing-text]
+  "extract sorted, deduped function names from typeinfer bail lines.
+   lines: 'typeinfer: hit *typeinfer-budget-ms* 5000 — bailing with partial result on <NAME>'
+   returns sorted vector of unique names"
+  ;; The fn name is a single whitespace-free token (e.g.
+  ;; thread-hoisted-through-header!, <unnamed>); capture it directly. Do NOT
+  ;; truncate the line first — long names push the token past 100 chars.
+  (let [lines (re-seq #"[^\n]+" timing-text)
+        names (reduce
+                (fn [acc line]
+                  (let [match (re-find #"bailing with partial result on (\S+)" line)]
+                    (if match
+                      (conj acc (second match))
+                      acc)))
+                [] lines)
+        deduped (-> names set sort vec)]
+    deduped))
+
+(require 'edn)
+
+(def argv            (drop 2 os/args))
+(def subcommand     (first argv))
+(def go-bin         (flag argv "--go" "go"))
+(def baseline-path  (flag argv "--baseline" "docs/perf/turnaround-baseline.edn"))
+(def threshold-pct  (read-string (flag argv "--threshold" "10")))
+(def no-regen?      (has-flag? argv "--no-regen"))
+(def timing-file    (flag argv "--timing-file" nil))
+
+(defn die [msg] (println "turnaround-ratchet ERROR:" msg) (os/exit 2))
+
+(defn file-exists? [path] (= 0 (:exit (os/sh "test" "-f" path))))
+
+;; Parse a duration string: "123ms" -> 123, "1.2s" -> 1200, etc.
+;; Returns 0 if unparseable.
+(defn parse-duration [s]
+  (cond
+    (re-find #"ms$" s)
+    (let [m (re-find #"^([\d.]+)ms$" s)]
+      (if m (int (read-string (second m))) 0))
+    (re-find #"s$" s)
+    (let [m (re-find #"^([\d.]+)s$" s)]
+      (if m (int (* 1000 (read-string (second m)))) 0))
+    :else 0))
+
+;; Parse the timing summary from stderr text.
+;; Returns {:namespaces {ns {:ms int :bails int}} :total-bails int :bailed-fns [sorted unique names]}
+;; Example line: "  phase2.lower.ir.passes.dce=310ms typeinfer-budget-bails=0"
+(defn parse-timing-summary [text]
+  (let [lines (re-seq #"[^\n]+" text)
+        phase2-lines (filter (fn [line] (re-find #"phase2\.lower\." line)) lines)
+        ns-entries (reduce
+                     (fn [acc line]
+                       (let [ns-match (re-find #"phase2\.lower\.([^\s=]+)=([^\s]+)" line)
+                             bail-match (re-find #"typeinfer-budget-bails=(\d+)" line)]
+                         (if (and ns-match bail-match)
+                           (let [ns (second ns-match)
+                                 dur-str (nth ns-match 2)
+                                 ms (parse-duration dur-str)
+                                 bails (int (read-string (second bail-match)))]
+                             (assoc acc ns {:ms ms :bails bails}))
+                           acc)))
+                     {} phase2-lines)
+        total-bails-match (re-find #"totals\.typeinfer-budget-bails=(\d+)" text)
+        total-bails (if total-bails-match (int (read-string (second total-bails-match))) 0)
+        total-ms (reduce + 0 (map :ms (vals ns-entries)))
+        bailed-fns (parse-bailed-fns text)]
+    {:namespaces ns-entries
+     :total-bails total-bails
+     :total-ms total-ms
+     :bailed-fns bailed-fns}))
+
+;; Compute the limit as baseline-ms * (100 + threshold-pct) / 100
+(defn time-limit-for [baseline-ms]
+  (quot (* baseline-ms (+ 100 threshold-pct)) 100))
+
+;; Bail-count limit: baseline + max(4, threshold%). Typeinfer bails are
+;; wall-clock-budget driven and so vary run-to-run (observed 20-22 on the
+;; reference machine); an exact ratchet is flaky in CI. The absolute floor of 4
+;; keeps it stable even as the baseline ratchets toward 0. Use --strict to
+;; enforce hard-zero regardless of baseline (the real goal: drive bails to 0).
+(defn bail-limit-for [baseline-bails]
+  (max (+ baseline-bails 4)
+       (quot (* baseline-bails (+ 100 threshold-pct)) 100)))
+
+;; Deterministic, diff-friendly EDN emission via the core writer (edn/pretty):
+;; sorted keys, pretty layout, round-trippable.
+(defn metrics->edn [metrics] (edn/pretty metrics))
+
+(defn read-baseline [path]
+  (when (file-exists? path) (read-string (slurp path))))
+
+;; items in seq `a` not present in seq `b`
+(defn set-diff [a b]
+  (let [bset (set b)]
+    (vec (filter (fn [x] (not (contains? bset x))) a))))
+
+(defn regen! []
+  (when-not no-regen?
+    (let [r (os/sh go-bin "run" "-tags" "bootstrap" "./cmd/lgbgen" "--target=go")]
+      (when-not (= 0 (:exit r)) (die (str "regeneration failed: " (:err r)))))))
+
+(defn get-timing-text []
+  (if no-regen?
+    (if (and timing-file (file-exists? timing-file))
+      (slurp timing-file)
+      (die (str "no --timing-file specified or file not found")))
+    (let [r (os/sh go-bin "run" "-tags" "bootstrap" "./cmd/lgbgen" "--target=go")]
+      (when-not (= 0 (:exit r)) (die (str "regeneration failed: " (:err r))))
+      (:err r))))
+
+(defn do-show []
+  (let [timing-text (get-timing-text)
+        current (parse-timing-summary timing-text)]
+    (print (metrics->edn current))
+    (os/exit 0)))
+
+(defn do-check []
+  (let [timing-text (get-timing-text)
+        current (parse-timing-summary timing-text)
+        baseline (read-baseline baseline-path)
+        strict? (has-flag? argv "--strict")
+        ;; --bails-only skips the wall-clock TIME gate. Lowering time varies
+        ;; run-to-run (machine load; nil-budget functions converge in variable
+        ;; time), so a hard time gate is flaky in a content-freshness check like
+        ;; make check-generated. Bails are deterministic (0), so they are the
+        ;; hard gate; time is tracked for a separate non-fatal CI alert.
+        bails-only? (has-flag? argv "--bails-only")
+        ;; --time-only is the mirror of --bails-only: skip the bail ratchet and
+        ;; run ONLY the wall-clock time band. Used by the non-fatal CI turnaround
+        ;; alert (task 4.2), where a regression is surfaced as a warning, not a
+        ;; build failure — the bail gate already covers correctness in
+        ;; make check-generated.
+        time-only? (has-flag? argv "--time-only")]
+    (when-not baseline (die (str "no baseline at " baseline-path " — run 'update' first")))
+    (let [base-nss (keys (:namespaces baseline))
+          cur-nss (keys (:namespaces current))
+          limit (time-limit-for (:total-ms baseline))
+          current-bails (:total-bails current)
+          baseline-bails (:total-bails baseline)
+          current-fns (:bailed-fns current)
+          fns-list (if (and current-fns (not (empty? current-fns)))
+                     (reduce (fn [a s] (if (empty? a) s (str a ", " s))) "" current-fns)
+                     "none")]
+
+      ;; Check 1: BAIL RATCHET — forbid growth or strict: forbid any bails
+      ;; (skipped under --time-only; the bail gate is enforced fatally elsewhere
+      ;; via make check-generated --bails-only).
+      (when-not time-only?
+        (if strict?
+          (when (> current-bails 0)
+            (println (str "TURNAROUND REGRESSION (--strict): typeinfer bails " current-bails " > 0"))
+            (when (seq current-fns)
+              (println "  These functions bailed and are DROPPED from native lowering (run interpreted):")
+              (doseq [fn current-fns]
+                (println (str "    - " fn))))
+            (os/exit 1))
+          (when (> current-bails (bail-limit-for baseline-bails))
+            (println (str "TURNAROUND REGRESSION: typeinfer bails " current-bails
+                       " > limit " (bail-limit-for baseline-bails)
+                       " (baseline " baseline-bails " +" threshold-pct "%, floor 4)"))
+            (when (seq current-fns)
+              (println "  These functions bailed and are DROPPED from native lowering (run interpreted):")
+              (doseq [fn current-fns]
+                (println (str "    - " fn))))
+            (os/exit 1))))
+
+      ;; Check 2: TIME BUDGET — forbid growth beyond threshold (skipped under
+      ;; --bails-only; wall-clock time is machine-dependent and varies run-to-run).
+      (when-not bails-only?
+        (when (> (:total-ms current) limit)
+          (println (str "TURNAROUND REGRESSION: total lowering time " (:total-ms current)
+                     "ms > limit " limit "ms (baseline " (:total-ms baseline)
+                     "ms +" threshold-pct "%)"))
+          (os/exit 1)))
+
+      ;; Both pass
+      (cond
+        time-only?
+        (println (str "OK: turnaround time " (:total-ms current) "ms/" limit "ms within band"
+                   " — bail gate skipped (--time-only)"))
+        bails-only?
+        (println (str "OK: typeinfer bails " current-bails "/" baseline-bails
+                   " within gate (still-dropped: " fns-list ") — time gate skipped (--bails-only)"))
+        :else
+        (println (str "OK: turnaround within band — bails " current-bails "/"
+                   baseline-bails " (still-dropped: " fns-list "), time " (:total-ms current) "ms/" limit "ms")))
+      (os/exit 0))))
+
+;; MIN-merge current into baseline: existing namespaces tighten (MIN per metric),
+;; new namespaces added at current size, removed namespaces drop. :total-ms and
+;; :total-bails are DERIVED from the merged namespace map (never MIN'd independently),
+;; so totals and namespaces can never disagree. :bailed-fns is a name set, not a count
+;; — update to current's set on merge.
+(defn merge-baseline [current baseline]
+  (let [base-nss (:namespaces baseline)
+        merged (reduce
+                 (fn [acc pair]
+                   (let [ns (first pair) cur-e (second pair)
+                         base-e (get base-nss ns)]
+                     (assoc acc ns
+                       (if base-e
+                         {:ms (min (:ms base-e) (:ms cur-e))
+                          :bails (min (:bails base-e) (:bails cur-e))}
+                         cur-e))))
+                 {} (:namespaces current))]
+    {:total-ms (reduce + 0 (map :ms (vals merged)))
+     :total-bails (reduce + 0 (map :bails (vals merged)))
+     :bailed-fns (:bailed-fns current)
+     :namespaces merged}))
+
+(defn do-update []
+  (let [timing-text (get-timing-text)
+        current (parse-timing-summary timing-text)
+        baseline (read-baseline baseline-path)
+        merged (if baseline (merge-baseline current baseline) current)]
+    (spit baseline-path (metrics->edn merged))
+    (println (str "wrote " baseline-path " (total-ms " (:total-ms merged)
+               " total-bails " (:total-bails merged) ")"))
+    (os/exit 0)))
+
+(cond
+  (= subcommand "show")   (do-show)
+  (= subcommand "check")  (do-check)
+  (= subcommand "update") (do-update)
+  :else (die (str "unknown subcommand " (pr-str subcommand) " — use check|update|show")))

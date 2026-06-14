@@ -21,6 +21,7 @@ import (
 
 	"github.com/nooga/let-go/pkg/bytecode"
 	"github.com/nooga/let-go/pkg/compiler"
+	"github.com/nooga/let-go/pkg/genmanifest"
 	"github.com/nooga/let-go/pkg/resolver"
 	"github.com/nooga/let-go/pkg/rt"
 	"github.com/nooga/let-go/pkg/vm"
@@ -382,6 +383,7 @@ func main() {
 	// immaterial and both artifacts come from one core compile.
 	if targetGo {
 		runGoTarget(goOutDir)
+		refreshManifest()
 		return
 	}
 	if targetBoth {
@@ -410,10 +412,41 @@ func writeBundle(outPath string, consts *vm.Consts, nsChunks map[string]*vm.Code
 		os.Exit(1)
 	}
 
-	fi, _ := f.Stat()
+	// Stat is best-effort: success here is just for the byte-count in the
+	// success line. If it fails, we still wrote the bundle, so report what we
+	// know without dereferencing a nil FileInfo.
+	if fi, err := f.Stat(); err == nil {
+		fmt.Printf("wrote %s (%d bytes, %d consts, %d namespaces)\n",
+			outPath, fi.Size(), len(consts.Values()), len(nsChunks))
+	} else {
+		fmt.Printf("wrote %s (%d consts, %d namespaces; stat failed: %v)\n",
+			outPath, len(consts.Values()), len(nsChunks), err)
+	}
 	f.Close()
-	fmt.Printf("wrote %s (%d bytes, %d consts, %d namespaces)\n",
-		outPath, fi.Size(), len(consts.Values()), len(nsChunks))
+	refreshManifest()
+}
+
+// refreshManifest records the content digest of all .lg + lgbgen sources
+// into pkg/rt/generated.sums, so the genmanifest staleness test and the
+// check-generated CLI can tell whether committed artifacts still match the
+// sources on disk.
+func refreshManifest() {
+	root, err := genmanifest.FindRepoRoot(".")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: skipping manifest refresh: %v\n", err)
+		return
+	}
+
+	digest, err := genmanifest.Compute(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: computing manifest digest failed: %v\n", err)
+		return
+	}
+	if err := genmanifest.Write(root, digest); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: writing %s failed: %v\n", genmanifest.ManifestRelPath, err)
+		return
+	}
+	fmt.Printf("wrote %s (%s)\n", genmanifest.ManifestRelPath, digest[:12])
 }
 
 // nsToGoPkgName converts a let-go namespace name to a valid Go package name.

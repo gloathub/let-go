@@ -1,8 +1,28 @@
 ;; edn — EDN reading and writing
-(ns edn)
+(ns edn
+  (:require
+   [pprint]))
 
 (defn read-string
   ([s] (core/read-string s)))
 
 (defn write-string [form]
   (pr-str form))
+
+;; deep-sort recursively reorders every map's keys into sorted order so that
+;; serialization is deterministic regardless of how the map was built. Vector
+;; and seq order is preserved (callers sort where order is semantic); scalars
+;; pass through unchanged.
+(defn deep-sort [form]
+  (cond
+    (map? form)    (reduce (fn [acc k] (assoc acc k (deep-sort (get form k))))
+                           (sorted-map) (sort (keys form)))
+    (vector? form) (mapv deep-sort form)
+    :else          form))
+
+;; pretty returns a deterministic, pretty-printed EDN string for `form`,
+;; newline-terminated. Determinism comes from deep-sort (stable key order);
+;; layout reuses the core pretty-printer. Suitable for committed,
+;; diff-friendly artifacts.
+(defn pretty [form]
+  (str (pprint/pprint-str (deep-sort form)) "\n"))

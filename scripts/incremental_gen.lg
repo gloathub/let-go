@@ -1,0 +1,224 @@
+;; scripts/incremental_gen.lg — fingerprint-gated incremental generation planner.
+;;
+;; Two-sided content staleness key (NEVER mtimes): a lowered package is
+;; up-to-date iff BOTH of its inputs are unchanged —
+;;   ir-stack-fp   : digest of the IR pipeline (ir.* sources + lgbgen)
+;;   module-src-fp : digest of that namespace's own source
+;; The key is the PAIR. Because ir-stack-fp is one half of every module's
+;; key, any pipeline edit forces a full relower (a pipeline change can
+;; invalidate any output) — that property falls out of the pair, no
+;; special-casing. See openspec change add-pipeline-turnaround, design.md.
+;;
+;; Subcommands:
+;;   plan       — print a decision EDN map to stdout (consumed by generate.lg)
+;;   commit     — re-emit current fingerprints and write the manifest (after a
+;;                successful lowering run, so recorded :out is the real output)
+;;   self-test  — run the pure-planner property checks (incl. the adversarial
+;;                "pipeline edit relowers an unchanged module" case); exit 1 on fail
+;;
+;; Flags:
+;;   --go <path>        go binary used to emit current fingerprints (default "go")
+;;   --manifest <path>  committed pair manifest (default "pkg/rt/generated.fingerprints")
+;;
+;; The `plan` decision EDN shape:
+;;   {:ir-stack-fp "<digest>"
+;;    :skip-stage0 <bool>          ; ir-stack unchanged -> reuse native pipeline binary
+;;    :relower-all <bool>          ; every module is stale -> lower the full tree
+;;    :relower     ["ns" ...]}     ; the stale namespaces (empty => nothing to do)
+
+(require 'edn)
+
+(defn flag [argv name default]
+  (loop [xs argv]
+    (cond
+      (empty? xs)         default
+      (= (first xs) name) (second xs)
+      :else               (recur (rest xs)))))
+
+(def argv          (drop 2 os/args))
+(def subcommand    (first argv))
+(def go-bin        (flag argv "--go" "go"))
+(def manifest-path (flag argv "--manifest" "pkg/rt/generated.fingerprints"))
+
+(defn die [msg] (println "incremental-gen ERROR:" msg) (os/exit 2))
+(defn file-exists? [path] (= 0 (:exit (os/sh "test" "-f" path))))
+
+;; ---------------------------------------------------------------------------
+;; Pure core — the decision. No IO; exercised directly by `self-test`.
+;; ---------------------------------------------------------------------------
+
+;; TRIPLE key: a module is FRESH iff its recorded entry matches the current
+;; pipeline digest, its own SOURCE digest, AND its on-disk OUTPUT digest.
+;; Missing record => stale. Any of the three differing => stale. The output
+;; leg catches a lowered .go that drifted (manual edit / corruption / partial
+;; write) even when both inputs are unchanged — which a source-only key would
+;; silently skip.
+(defn module-fresh? [recorded cur-ir cur-src cur-out]
+  (and recorded
+       (= (:ir recorded) cur-ir)
+       (= (:src recorded) cur-src)
+       (= (:out recorded) cur-out)))
+
+;; ns belongs to the IR pipeline stack ("ir" or "ir.*").
+(defn ir-ns? [ns] (boolean (re-find #"^ir(\.|$)" ns)))
+
+;; plan-incremental: current {:ir-stack-fp :modules {ns src-fp} :outputs {ns out-fp}}
+;;                   prior   {:ir-stack-fp :pairs {ns {:ir :src :out}}} | nil
+;; -> {:ir-stack-fp :skip-stage0 :relower-all :relower}
+;; (The manifest itself is written by `commit` from a POST-run emit, so the
+;;  recorded output signatures reflect the bytes actually produced.)
+(defn plan-incremental [current prior]
+  (let [cur-ir   (:ir-stack-fp current)
+        modules  (:modules current)
+        outputs  (:outputs current)
+        names    (sort (keys modules))
+        prior-ir (when prior (:ir-stack-fp prior))
+        pairs    (if prior (:pairs prior) {})
+        relower  (vec (filter
+                        (fn [ns]
+                          (not (module-fresh? (get pairs ns) cur-ir
+                                              (get modules ns) (get outputs ns))))
+                        names))
+        ;; Stage 0 re-lowers ir.* from source to rebuild the native pipeline
+        ;; binary; skip it only when the pipeline digest is unchanged AND no
+        ;; ir.* module is itself stale (e.g. its lowered .go drifted) — an
+        ;; ir output drift must be re-lowered before the binary is rebuilt.
+        ir-stale (boolean (some ir-ns? relower))
+        skip0    (boolean (and prior-ir (= cur-ir prior-ir) (not ir-stale)))]
+    {:ir-stack-fp cur-ir
+     :skip-stage0 skip0
+     :relower-all (= (count relower) (count names))
+     :relower     relower}))
+
+;; build-manifest: turn a current emit ({:ir-stack-fp :modules :outputs}) into
+;; the committed manifest shape {:ir-stack-fp :pairs {ns {:ir :src :out}}}.
+;; Run by `commit` AFTER lowering so :out is the freshly-produced signature.
+;; Key ordering / determinism is handled by edn/pretty on write.
+(defn build-manifest [emitted]
+  (let [ir    (:ir-stack-fp emitted)
+        ms    (:modules emitted)
+        outs  (:outputs emitted)]
+    {:ir-stack-fp ir
+     :pairs (reduce (fn [acc ns] (assoc acc ns {:ir ir :src (get ms ns) :out (get outs ns)}))
+                    {} (keys ms))}))
+
+;; ---------------------------------------------------------------------------
+;; EDN IO
+;; ---------------------------------------------------------------------------
+
+(defn emit-current []
+  "Shell `lgbgen --emit-fingerprints` (read-only, no lowering) and parse its
+   EDN: {:ir-stack-fp .. :modules {ns src-fp ..}}."
+  (let [r (os/sh go-bin "run" "-tags" "bootstrap" "./cmd/lgbgen" "--emit-fingerprints")]
+    (when (not= 0 (:exit r))
+      (die (str "emit-fingerprints failed (exit " (:exit r) "): " (:err r))))
+    (read-string (:out r))))
+
+(defn read-prior []
+  (when (file-exists? manifest-path)
+    (read-string (slurp manifest-path))))
+
+;; The committed manifest is written via the shared deterministic pretty-EDN
+;; writer (edn/pretty). The plan decision is a transient wire value parsed
+;; by generate.lg, so a compact pr-str line is fine there.
+(defn decision->edn [p] (str (pr-str p) "\n"))
+
+;; ---------------------------------------------------------------------------
+;; Subcommands
+;; ---------------------------------------------------------------------------
+
+(defn do-plan []
+  (let [current (emit-current)
+        prior   (read-prior)
+        p       (plan-incremental current prior)]
+    ;; stdout = ONLY the decision EDN, so generate.lg can read-string it.
+    (print (decision->edn p))
+    (os/exit 0)))
+
+;; commit re-emits fingerprints from the CURRENT on-disk state (run AFTER
+;; lowering) and writes the manifest, so each module's recorded :out is the
+;; signature of the bytes actually on disk now. generate.lg calls this only
+;; once the lowering it planned has succeeded.
+(defn do-commit []
+  (spit manifest-path (edn/pretty (build-manifest (emit-current))))
+  (println (str "incremental-gen: committed " manifest-path))
+  (os/exit 0))
+
+;; ---- self-test: the pure planner's correctness properties ----
+
+(def ^:dynamic *fails* (atom 0))
+(defn check [label ok?]
+  (if ok?
+    (println (str "  ok   " label))
+    (do (println (str "  FAIL " label)) (swap! *fails* inc))))
+
+(defn do-self-test []
+  (let [ir1 "ir-AAAA"
+        ir2 "ir-BBBB"   ; a different pipeline digest (e.g. ir.build edited)
+        cur (fn [ir mods outs] {:ir-stack-fp ir :modules mods :outputs outs})
+        mods0 {"core" "c1" "edn" "e1" "ir.build" "b1"}
+        outs0 {"core" "co1" "edn" "eo1" "ir.build" "bo1"}
+        ;; A prior manifest produced by an earlier full run at ir1.
+        prior1 {:ir-stack-fp ir1
+                :pairs {"core"     {:ir ir1 :src "c1" :out "co1"}
+                        "edn"      {:ir ir1 :src "e1" :out "eo1"}
+                        "ir.build" {:ir ir1 :src "b1" :out "bo1"}}}]
+
+    ;; 1. No prior -> everything stale, full work, no skip.
+    (let [p (plan-incremental (cur ir1 mods0 outs0) nil)]
+      (check "no-prior: relower-all" (:relower-all p))
+      (check "no-prior: no stage0 skip" (not (:skip-stage0 p)))
+      (check "no-prior: relower lists every module" (= (set (:relower p)) #{"core" "edn" "ir.build"})))
+
+    ;; 2. Nothing changed -> skip stage 0, relower nothing.
+    (let [p (plan-incremental (cur ir1 mods0 outs0) prior1)]
+      (check "unchanged: skip stage0" (:skip-stage0 p))
+      (check "unchanged: relower empty" (empty? (:relower p)))
+      (check "unchanged: not relower-all" (not (:relower-all p))))
+
+    ;; 3. Only a NON-ir module's source changed (ir-stack same) ->
+    ;;    skip stage 0, relower ONLY that module.
+    (let [p (plan-incremental (cur ir1 (assoc mods0 "edn" "e2") outs0) prior1)]
+      (check "src-change: skip stage0 (pipeline unchanged)" (:skip-stage0 p))
+      (check "src-change: relower only the changed module" (= (:relower p) ["edn"]))
+      (check "src-change: not relower-all" (not (:relower-all p))))
+
+    ;; 4. ADVERSARIAL (task 5.3): the pipeline (ir-stack) changed but a
+    ;;    module's OWN source is byte-identical -> the module MUST relower,
+    ;;    AND stage 0 must NOT be skipped. A single-sided (module-only) key
+    ;;    would wrongly skip it; the pair key catches it.
+    (let [p (plan-incremental (cur ir2 mods0 outs0) prior1)] ; same srcs+outs, only ir changed
+      (check "pipeline-edit: NO stage0 skip" (not (:skip-stage0 p)))
+      (check "pipeline-edit: unchanged module 'core' STILL relowers"
+             (contains? (set (:relower p)) "core"))
+      (check "pipeline-edit: relower-all (pipeline invalidates everything)" (:relower-all p)))
+
+    ;; 5. OUTPUT DRIFT on a NON-ir module: both inputs identical, but the
+    ;;    lowered .go on disk changed (hand-edit / corruption) -> relower ONLY
+    ;;    that module; stage 0 still skips (pipeline + ir outputs intact).
+    (let [p (plan-incremental (cur ir1 mods0 (assoc outs0 "edn" "eo2")) prior1)]
+      (check "out-drift(non-ir): relower the drifted module" (= (:relower p) ["edn"]))
+      (check "out-drift(non-ir): still skip stage0" (:skip-stage0 p))
+      (check "out-drift(non-ir): not relower-all" (not (:relower-all p))))
+
+    ;; 6. OUTPUT DRIFT on an IR module: inputs identical but ir.build's lowered
+    ;;    .go drifted -> relower it AND do NOT skip stage 0 (the native binary
+    ;;    must be rebuilt from a correctly re-lowered ir tree).
+    (let [p (plan-incremental (cur ir1 mods0 (assoc outs0 "ir.build" "bo2")) prior1)]
+      (check "out-drift(ir): relower ir.build" (contains? (set (:relower p)) "ir.build"))
+      (check "out-drift(ir): NO stage0 skip (ir output must be rebuilt)" (not (:skip-stage0 p))))
+
+    ;; 7. build-manifest re-keys every module to the current (ir, src, out).
+    (let [m (build-manifest (cur ir2 mods0 outs0))]
+      (check "build-manifest: re-keys to new ir-stack-fp" (= ir2 (get-in m [:pairs "core" :ir])))
+      (check "build-manifest: records output signature" (= "bo1" (get-in m [:pairs "ir.build" :out]))))
+
+    (let [n @*fails*]
+      (println (str "\nincremental-gen self-test: " (if (zero? n) "ALL PASS" (str n " FAILED"))))
+      (os/exit (if (zero? n) 0 1)))))
+
+(cond
+  (= subcommand "plan")      (do-plan)
+  (= subcommand "commit")    (do-commit)
+  (= subcommand "self-test") (do-self-test)
+  :else (die (str "unknown subcommand " (pr-str subcommand) " — use plan|commit|self-test")))

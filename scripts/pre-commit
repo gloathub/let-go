@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook: block a commit whose .lg / lgbgen sources changed
+# without regenerating the bundle + lowered Go tree.
+#
+# Install with:  make install-hooks   (symlinks .git/hooks/pre-commit here)
+#
+# Content-based via cmd/check-generated, so it is reliable regardless of
+# file mtimes. NOTE: `jj` does not run git hooks — jj users are covered
+# by the genmanifest staleness test (`go test ./pkg/genmanifest/...`),
+# by CI, and by `make check-generated`.
+set -euo pipefail
+
+# Resolve repo root from the hook's own location (.git/hooks/pre-commit
+# may be a symlink into scripts/).
+script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo "$script_path/..")"
+cd "$repo_root"
+
+if ! go run ./cmd/check-generated; then
+	echo
+	echo "pre-commit: refusing to commit stale generated artifacts." >&2
+	echo "pre-commit: run 'make generate' and stage the result, or" >&2
+	echo "pre-commit: 'git commit --no-verify' to bypass intentionally." >&2
+	exit 1
+fi

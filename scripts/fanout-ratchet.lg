@@ -28,6 +28,8 @@
       (= (first xs) name) true
       :else               (recur (rest xs)))))
 
+(require 'edn)
+
 (def argv          (drop 2 os/args))
 (def subcommand    (first argv))
 (def go-bin        (flag argv "--go" "go"))
@@ -111,18 +113,9 @@
      :modules     modules}))
 
 ;; --- deterministic, diff-friendly EDN emission (sorted module keys) ---
-(defn module->edn [m e]
-  (str "            \"" m "\" {:bytes " (:bytes e) " :loc " (:loc e) " :files " (:files e) "}"))
-
-(defn metrics->edn [metrics]
-  (let [mods  (sort (keys (:modules metrics)))
-        lines (map (fn [m] (module->edn m (get (:modules metrics) m))) mods)]
-    (str "{:total-bytes " (:total-bytes metrics) "\n"
-         " :total-loc " (:total-loc metrics) "\n"
-         " :files " (:files metrics) "\n"
-         " :modules {\n"
-         (reduce (fn [a l] (str a l "\n")) "" lines)
-         "           }}\n")))
+;; Deterministic, diff-friendly EDN emission via the core writer (edn/pretty):
+;; sorted keys, pretty layout, round-trippable.
+(defn metrics->edn [metrics] (edn/pretty metrics))
 
 (defn regen! []
   (when-not no-regen?
