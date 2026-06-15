@@ -13,11 +13,17 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"runtime/pprof"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/nooga/let-go/pkg/bytecode"
 	"github.com/nooga/let-go/pkg/compiler"
@@ -290,26 +296,70 @@ func sortStrings(s []string) {
 func main() {
 	// Parse mode: --target=go <out-dir>, --target=both [bundle-path], or
 	// default bytecode mode. `both` emits the .lgb bundle AND the gogen_ir
-	// Go tree from a single core compile (see the dispatch below).
+	// Go tree from a single core compile (see the dispatch below). Optional
+	// -cpuprofile writes a Go CPU profile for the lgbgen process itself.
 	targetGo := false
 	targetBoth := false
 	outPath := "pkg/rt/core_compiled.lgb"
 	goOutDir := "pkg/rt/core_go_lowered"
+	var target string
+	var cpuProfilePath string
 
-	args := os.Args[1:]
+	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	fs.StringVar(&target, "target", "", "generation target: go, both, or empty for bundle-only")
+	fs.StringVar(&cpuProfilePath, "cpuprofile", "", "write Go CPU profile for the lgbgen process")
+	fs.Parse(os.Args[1:])
+
+	switch target {
+	case "":
+	case "go":
+		targetGo = true
+	case "both":
+		targetBoth = true
+	default:
+		fmt.Fprintf(os.Stderr, "unknown --target=%q (expected go or both)\n", target)
+		os.Exit(2)
+	}
+
+	args := fs.Args()
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--target=go":
-			targetGo = true
-			if i+1 < len(args) {
-				goOutDir = args[i+1]
-				i++
-			}
-		case "--target=both":
-			targetBoth = true
-		default:
+		if targetGo && i == 0 {
+			goOutDir = args[i]
+		} else {
 			outPath = args[i]
 		}
+	}
+	if cpuProfilePath != "" {
+		f, err := os.Create(cpuProfilePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "create cpuprofile %s: %v\n", cpuProfilePath, err)
+			os.Exit(1)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			f.Close()
+			fmt.Fprintf(os.Stderr, "start cpuprofile %s: %v\n", cpuProfilePath, err)
+			os.Exit(1)
+		}
+		var stopProfileOnce sync.Once
+		stopProfile := func() {
+			stopProfileOnce.Do(func() {
+				pprof.StopCPUProfile()
+				if err := f.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "close cpuprofile %s: %v\n", cpuProfilePath, err)
+				}
+			})
+		}
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(sigCh)
+		go func() {
+			sig := <-sigCh
+			fmt.Fprintf(os.Stderr, "received %s, flushing cpu profile\n", sig)
+			stopProfile()
+			time.Sleep(250 * time.Millisecond)
+			os.Exit(130)
+		}()
+		defer stopProfile()
 	}
 
 	// rt.init() has already run — native builtins are registered in CoreNS.
