@@ -60,6 +60,47 @@ func ensureLoaded() error {
 			}
 			return n.DefStub(name)
 		}
+		// runBundle eagerly decodes and runs every namespace chunk (then main)
+		// of an .lgb, defining its vars' roots.
+		runBundle := func(lgb []byte, what string) error {
+			u, derr := bytecode.DecodeToExecUnit(bytes.NewReader(lgb), resolve)
+			if derr != nil {
+				return fmt.Errorf("decoding %s: %w", what, derr)
+			}
+			for _, nm := range u.NSOrder {
+				ch := u.NSChunks[nm]
+				if ch == nil || ch == u.MainChunk {
+					continue
+				}
+				fr := vm.NewFrame(ch, nil)
+				_, e := fr.RunProtected()
+				vm.ReleaseFrame(fr)
+				if e != nil {
+					return fmt.Errorf("loading %s namespace %s: %w", what, nm, e)
+				}
+			}
+			if u.MainChunk != nil {
+				fr := vm.NewFrame(u.MainChunk, nil)
+				_, e := fr.RunProtected()
+				vm.ReleaseFrame(fr)
+				if e != nil {
+					return fmt.Errorf("running %s main: %w", what, e)
+				}
+			}
+			return nil
+		}
+		// Stage-A stopgap: the bytecode-embedded app bundle references .lg-defined
+		// core/stdlib fns (empty?, string/ends-with?, …) whose vars are nil-rooted
+		// until their defining chunks run. A normal `lg` run bootstraps the .lg
+		// core via the compiler; this bare loader must do it explicitly. Eager-load
+		// the embedded core (core_compiled.lgb) before the app bundle.
+		// TODO(gloat-model): once all of core is lowered to native Go, the lowered
+		// library is self-contained and must NOT load any bytecode core at runtime —
+		// drop this once core is fully lowered.
+		if err := runBundle(rt.CoreCompiledLGB, "core"); err != nil {
+			loadErr = err
+			return
+		}
 		unit, err := bytecode.DecodeToExecUnit(bytes.NewReader(bundleLGB), resolve)
 		if err != nil {
 			loadErr = fmt.Errorf("decoding bundle: %w", err)
