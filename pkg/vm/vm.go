@@ -61,6 +61,7 @@ const (
 	OP_INC  // inc (1 arg)
 	OP_DEC  // dec (1 arg)
 	OP_QUOT // quot — integer quotient, truncated toward zero (2 args)
+	OP_DIV  // / — true division; int/int yields a Ratio (or Int when exact), any float yields Float (2 args)
 )
 
 func OpcodeToString(op int32) string {
@@ -103,6 +104,7 @@ func OpcodeToString(op int32) string {
 		"INC",
 		"DEC",
 		"QUOT",
+		"DIV",
 	}
 	if int(inst) < len(ops) {
 		return fmt.Sprintf("%d/%-16s", sp, ops[inst])
@@ -1064,6 +1066,24 @@ func (f *Frame) Run() (Value, error) {
 				}
 			}
 			r, err := NumQuot(a, b)
+			if err != nil {
+				if f.handleError(err) {
+					continue
+				}
+				return NIL, err
+			}
+			f.stack[f.sp-2] = r
+			f.sp--
+			f.ip++
+
+		case OP_DIV:
+			// True division (clojure.core//). NumDiv produces the exact
+			// numeric-tower result: Int/Int -> Ratio (or Int when exact),
+			// any Float -> Float. Identical to the `/` core fn so the IR
+			// path (OP_DIV / rt.DivValue) never diverges from the interpreter.
+			b := f.stack[f.sp-1]
+			a := f.stack[f.sp-2]
+			r, err := NumDiv(a, b)
 			if err != nil {
 				if f.handleError(err) {
 					continue

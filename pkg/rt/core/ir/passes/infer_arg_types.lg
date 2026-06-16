@@ -12,7 +12,9 @@
 ;; param types through the rest of the function.
 
 (ns ir.passes.infer-arg-types
-  (:require ir.data))
+  (:require
+   [ir.data]
+   [ir.lattice :as lat]))
 
 ;; Ops that constrain their operands to be :int. Conservative — we don't
 ;; try to distinguish :int from :float here; the dominant case in the
@@ -41,28 +43,47 @@
     (= a b)        a
     :else          :unknown))
 
-(defn- infer-one-load-arg! [f use-index nid]
+(defn- infer-one-load-arg [f nid]
   "Walk the users of load-arg inst nid; JOIN their op constraints.
-   When the result is more specific than :unknown, store it via
-   set-type! so downstream passes pick it up."
-  (let [bs     (nth use-index nid)
-        joined (atom :unknown)]
-    (when-not (ir/uses-empty? bs)
-      (ir/uses-for-each bs
-        (fn [user-nid]
-          (let [user-op (ir/op user-nid f)
-                c       (constraint-from-user user-op)]
-            (swap! joined join-types c))))
-      (when (not= :unknown @joined)
-        (ir/set-type! f nid @joined)))))
+   Returns the joined seed type for the shared typeinfra state."
+  (let [inst-count (ir/inst-count f)]
+    (loop [user-nid 0
+           joined :unknown]
+      (if (< user-nid inst-count)
+        (let [refs (ir/refs user-nid f)
+              uses-nid? (loop [remaining refs]
+                          (if (seq remaining)
+                            (if (= nid (first remaining))
+                              true
+                              (recur (rest remaining)))
+                            false))
+              joined' (if uses-nid?
+                        (join-types joined (constraint-from-user (ir/op user-nid f)))
+                        joined)]
+          (recur (inc user-nid) joined'))
+        joined))))
 
-(defn infer-arg-types [f]
+(defn infer-arg-types
   "Scan the entry block for :load-arg insts and infer each one's type
-   from its users' op constraints. Mutates f. Idempotent."
-  (let [entry-bid (ir/entry-block f)
-        insts     (ir/block-insts entry-bid f)
-        use-index (ir/uses f)]
-    (doseq [nid insts]
-      (when (= :load-arg (ir/op nid f))
-        (infer-one-load-arg! f use-index nid))))
-  f)
+   from its users' op constraints. The two-arg form writes only to the
+   shared typeinfra state; the one-arg form preserves the old mutate+flush API."
+  ([f]
+   (let [state (lat/seed-state-from-inst-types! (lat/new-typeinfra-state f) f)
+         state (infer-arg-types f state)]
+     (lat/flush-state-types! state f)
+     f))
+  ([f state]
+   (let [entry-bid (ir/entry-block f)
+         insts     (ir/block-insts entry-bid f)]
+     (loop [remaining insts
+            s state]
+       (if (seq remaining)
+         (let [nid (first remaining)]
+           (if (= :load-arg (ir/op nid f))
+             (let [inferred (infer-one-load-arg f nid)
+                   s' (if (not= :unknown inferred)
+                        (lat/join-inst-type! s nid inferred)
+                        s)]
+               (recur (rest remaining) s'))
+             (recur (rest remaining) s)))
+         s)))))

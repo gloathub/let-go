@@ -20,6 +20,7 @@
    :sub  "-"
    :mul  "*"
    :quot "/"
+   :div  "/"
    :lt   "<"
    :lte  "<="
    :gt   ">"
@@ -42,13 +43,31 @@
      :reason msg}
     (throw (str "ir.lower-go: " msg))))
 
+(defn- dtype-go-type-spec [t]
+  (when (and (vector? t) (= :dtype (first t)) (= 2 (count t)))
+    ;; Use go-export-name so the pointer type matches the struct that
+    ;; lower-deftype-struct emits (e.g. HyphenBox -> *Hyphenbox). Raw (name ..)
+    ;; produced *HyphenBox, which didn't match the generated `type Hyphenbox`.
+    (str "*" (go-export-name (nth t 1)))))
+
 (defn- go-type-spec [t]
   (cond
+    (dtype-go-type-spec t)                         (dtype-go-type-spec t)
     (or (= t :int) (= t [:const :int 0]))        "int"
     (or (= t :float) (= t [:const :float 0.0]))  "float64"
     (or (= t :bool) (= t :true) (= t :false))    "bool"
     (= t :string)                                "string"
     (= t :char)                                  "vm.Char"
+    ;; :ratio (let-go core Ratio) is a heap value with no native Go scalar
+    ;; type and no native ratio arithmetic in the lowerer, so it boxes to
+    ;; vm.Value and flows through the runtime, like any non-primitive numeric.
+    (= t :ratio)                                 "vm.Value"
+    ;; :number is the {int,float} join (lattice/mask-number) — Go has no
+    ;; native int-or-float type, so it boxes to vm.Value, exactly like the
+    ;; [:union ...] case below. Without this clause an honest int|float
+    ;; result (e.g. (if p 1 2.0), or a folded mixed-arith constant) falls to
+    ;; :else nil and strict lower-go throws "unsupported result type".
+    (= t :number)                                "vm.Value"
     (or (= t :unknown) (= t :any) (= t :nil))    "vm.Value"
     (and (vector? t) (= (first t) :union))       "vm.Value"
     ;; [:dtype T] — a native deftype instance, lowered as a pointer *T to the
@@ -149,6 +168,8 @@
    set (the supported unboxed lowering targets)."
   [spec raw]
   (cond
+    (and (string? spec) (pos? (count spec)) (= \* (nth spec 0)))
+    (gogen/type-assert raw (gogen/type spec))
     (= spec "bool")     (gogen/call (vm-sel "IsTruthy") [raw])
     (= spec "int")      (gogen/call (gogen/ident "int")     [(gogen/type-assert raw (gogen/type "vm.Int"))])
     (= spec "float64")  (gogen/call (gogen/ident "float64") [(gogen/type-assert raw (gogen/type "vm.Float"))])
@@ -539,13 +560,31 @@
             order-op?    (#{"<" "<=" ">" ">="} op-str)
             arith-op?    (#{"+" "-" "*" "/"} op-str)
             any-vm?      (or (= "vm.Value" s0) (= "vm.Value" s1))
-            ;; rt.LtValue/AddValue/... polymorphic helpers — used when
-            ;; any operand is vm.Value, so we don't bail the whole defn.
-            ;; Each helper mirrors the bytecode VM's OP_<X>: vm.Int fast
-            ;; path then vm.Num<X> fallback for ordering; always-delegate
-            ;; to vm.Num<X> for arithmetic (keeps overflow / BigInt
-            ;; promotion semantics in one place).
-            vm-helper    (when any-vm?
+            ;; quot ("/") lowers to native Go `/` ONLY for int/int — Go integer
+            ;; division truncates toward zero exactly like clojure.core/quot.
+            ;; For any other operand mix (float, ratio, boxed) native `/` is
+            ;; wrong: float `/` does NOT truncate, and a native int/float `/`
+            ;; isn't valid Go. Force the rt.QuotValue helper, which performs the
+            ;; runtime truncating division across the numeric tower.
+            ;; quot and div both render Go `/` but route differently (dispatch
+            ;; on the op-kw, NOT op-str): quot is native only for int/int (Go
+            ;; int `/` truncates toward zero like quot); div is native only for
+            ;; float/float (Go float `/` matches clojure.core// on floats).
+            ;; Every other operand mix uses the runtime helper — native `/`
+            ;; would be wrong (no truncation for quot; Ratio dropped for div) or
+            ;; invalid Go (mixed int/float). rt.QuotValue / rt.DivValue compute
+            ;; the exact numeric-tower result.
+            quot-rt?     (and (= op :quot)
+                              (not (and (= "int" s0) (= "int" s1))))
+            div-rt?      (and (= op :div)
+                              (not (and (= "float64" s0) (= "float64" s1))))
+            ;; rt.LtValue/AddValue/... polymorphic helpers — used when any
+            ;; operand is vm.Value (so we don't bail the whole defn), or when
+            ;; quot/div need the runtime divide (above). Each helper mirrors the
+            ;; bytecode VM's OP_<X>: vm.Int fast path then vm.Num<X> fallback for
+            ;; ordering; always-delegate to vm.Num<X> for arithmetic (keeps
+            ;; overflow / BigInt / Ratio promotion semantics in one place).
+            vm-helper    (when (or any-vm? quot-rt? div-rt?)
                            (cond
                              (= op-str "<")  "LtValue"
                              (= op-str "<=") "LeValue"
@@ -554,7 +593,8 @@
                              (= op-str "+")  "AddValue"
                              (= op-str "-")  "SubValue"
                              (= op-str "*")  "MulValue"
-                             (= op-str "/")  "QuotValue"
+                             (= op :quot)    "QuotValue"
+                             (= op :div)     "DivValue"
                              :else           nil))
             ;; Mixed operand types (only meaningful when NOT routing
             ;; through a helper, i.e. for `==`/`!=` with one vm.Value
@@ -1151,6 +1191,8 @@
       (= target-type "bool")
       (gogen/call (gogen/ident "bool")
                   [(gogen/type-assert boxed (gogen/type "vm.Boolean"))])
+      (and (string? target-type) (pos? (count target-type)) (= \* (nth target-type 0)))
+      (gogen/type-assert boxed (gogen/type target-type))
       (or (= target-type "int") (= target-type "int64"))
       (gogen/call (gogen/ident target-type)
                   [(gogen/type-assert boxed (gogen/type "vm.Int"))])

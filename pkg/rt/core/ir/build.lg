@@ -372,6 +372,7 @@
    '-    :sub
    '*    :mul
    'quot :quot
+   '/    :div
    '<    :lt
    '<=   :lte
    '>    :gt
@@ -464,12 +465,17 @@
         ;; Wrong-arity (inc) / (inc x y) — fall back to a generic call so
         ;; the runtime arity-error surfaces normally.
         (build-call form ctx))
-      ;; Unary: (- x) → (sub 0 x); (+ x), (* x), comparisons → identity.
+      ;; Unary: (- x) → (sub 0 x); (/ x) → (div 1 x) [reciprocal];
+      ;; (+ x), (* x), comparisons → identity.
       (= 1 (count args))
-      (if (= op-kw :sub)
+      (cond
+        (= op-kw :sub)
         (let [zero-id (add-inst! ctx (ctx-block ctx) :const [] 0)]
           (add-inst! ctx (ctx-block ctx) :sub [zero-id (nth args 0)] nil))
-        (nth args 0))
+        (= op-kw :div)
+        (let [one-id (add-inst! ctx (ctx-block ctx) :const [] 1)]
+          (add-inst! ctx (ctx-block ctx) :div [one-id (nth args 0)] nil))
+        :else (nth args 0))
       (= 2 (count args))
       (add-inst! ctx (ctx-block ctx) op-kw args nil)
       :else

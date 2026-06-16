@@ -1,0 +1,344 @@
+;; ir.lattice — the type lattice for IR analyses.
+;;
+;; Lifted out of ir.passes.typeinfer so it is a standalone, mergeable unit:
+;; other passes that need lattice-like joins can require it, and it can be
+;; lowered/updated incrementally (cheap isolated lowering) without touching the
+;; worklist. The lattice values:
+;;   :bottom :unknown :any
+;;   :nil :true :false :bool :string :int :float :number :char
+;;   [:const :int 0] [:const :float 0.0]
+;;   [:union ...]
+;;
+;; Two representations, kept in lockstep for the pure-kind hot path:
+;;   - keyword/vector form (canonical surface; carries const-zero, consumed by
+;;     dump + lower-go)
+;;   - bitset mask form (O(1) join for the hot worklist; pure-kind only —
+;;     numeric VALUES live in the separate numeric track, not here)
+
+(ns ir.lattice)
+
+(def ^:private type-order
+  {:true 0
+   :false 1
+   :bool 2
+   :int 3
+   :float 4
+   :number 5
+   :string 6
+   :char 7
+   :nil 8
+   :unknown 9
+   :any 10
+   :bottom 11
+   :dtype 12
+   :ratio 13})
+
+;; --- diagnostic instrumentation ---
+;; Bind *ti-counters* to an atom-map around an analysis to record per-pass
+;; counts (e.g. type-join / normalize calls). Zero overhead when nil; used by
+;; scripts/ir-stress.lg's `trace` mode + the bitset gate harnesses.
+(def ^:dynamic *ti-counters* nil)
+(defn ti-inc! [k]
+  (when *ti-counters* (swap! *ti-counters* update k (fnil inc 0))))
+
+(defn union-type? [t]
+  (and (vector? t) (= :union (first t))))
+
+(defn const-type? [t]
+  (and (vector? t) (= :const (first t))))
+
+(defn dtype-type? [t]
+  (and (vector? t) (= :dtype (first t)) (= 2 (count t))))
+
+(defn maskable-type? [t]
+  (cond
+    ;; :ratio is a first-class core numeric type but has NO bitset bit — the
+    ;; mask lattice encodes only the int/float/bool/string/char/nil kind
+    ;; universe. Keep :ratio out of the mask path so it survives the threaded
+    ;; state as a keyword fact (fact-from-type preserves non-maskable types
+    ;; exactly), exactly like dtype types. Without this, type->mask would have
+    ;; no bit for it and collapse :ratio to mask-any (:any).
+    (= t :ratio) false
+    (keyword? t) true
+    (union-type? t) (every? maskable-type? (rest t))
+    :else false))
+
+(defn- type-rank [t]
+  (let [key (cond
+              (const-type? t) (nth t 1)
+              (dtype-type? t) :dtype
+              :else t)]
+    (get type-order key 100)))
+
+(defn- sort-members [members]
+  (sort-by type-rank members))
+
+;; --- bitset lattice (O(1) join) ---------------------------------------------
+;; The finite kind lattice encodes as a bare-int bitmask: 1 bit per
+;; non-collapsing kind, bit 8 = :any (TOP, read first), bit 9 = :unknown
+;; (absorbs concretes; :any beats it), :bottom = 0. :number = {int,float};
+;; :bool is its OWN bit, subsuming true/false on readout. join = bit-or;
+;; mask->type canonicalizes exactly as the keyword union path. Bare-int
+;; bit-or/bit-and (VM builtins) — no bs-* dependency. Proven ≡ type-join over
+;; all 26244 non-const pairs by scripts/ti-bitset-proptest.lg.
+(def ^:private kind-bit {:nil 0 :true 1 :false 2 :bool 3 :int 4 :float 5 :string 6 :char 7})
+(def ^:private mask-any (bit-shift-left 1 8))
+(def ^:private mask-unknown (bit-shift-left 1 9))
+(def ^:private mask-number (bit-or (bit-shift-left 1 4) (bit-shift-left 1 5)))
+
+(defn- mask-bit? [m b] (not (zero? (bit-and m (bit-shift-left 1 b)))))
+
+(defn type->mask [t]
+  (cond
+    (dtype-type? t)  nil
+    (= t :bottom)  0
+    (= t :any)     mask-any
+    (= t :unknown) mask-unknown
+    (= t :number)  mask-number
+    (union-type? t)
+    (reduce (fn [m mem] (bit-or m (type->mask mem))) 0 (rest t))
+    ;; const-zero stays a first-class surface type; the mask path collapses it
+    ;; to its kind bit because the scratch representation is intentionally
+    ;; pure-kind only.
+    (const-type? t)
+    (let [tag (nth t 1)]
+      (cond
+        (= tag :int)   (bit-shift-left 1 (get kind-bit :int))
+        (= tag :float) (bit-shift-left 1 (get kind-bit :float))
+        :else          mask-any))
+    :else (let [b (get kind-bit t)]
+            (if b (bit-shift-left 1 b) mask-any))))
+
+;; pure bit-or over the total encoding; :any/:unknown bits ride along and are
+;; read back by mask->type's precedence. Monotone (bits only set, never cleared).
+(defn mask-join [a b] (bit-or a b))
+
+(defn mask->type [m]
+  (cond
+    (mask-bit? m 8) :any
+    (mask-bit? m 9) :unknown
+    (zero? m) :bottom
+    :else
+    (let [set? (fn [b] (mask-bit? m b))
+          members (vec (concat
+                         (if (set? 0) [:nil] [])
+                         (if (set? 3)
+                           [:bool]
+                           (concat (if (set? 1) [:true] [])
+                                   (if (set? 2) [:false] [])))
+                         (cond
+                           (and (set? 4) (set? 5)) [:number]
+                           (set? 4) [:int]
+                           (set? 5) [:float]
+                           :else [])
+                         (if (set? 6) [:string] [])
+                         (if (set? 7) [:char] [])))]
+      (cond
+        (empty? members) :bottom
+        (= 1 (count members)) (first members)
+        :else (into [:union] (sort-members members))))))
+
+;; --- keyword/vector canonicalization + join ---------------------------------
+
+(defn normalize-type [t]
+  (ti-inc! :normalize)
+  (cond
+    (nil? t) :unknown
+    (keyword? t) t
+    (dtype-type? t) t
+    (const-type? t)
+    (let [tag (nth t 1)
+          v   (nth t 2)]
+      (cond
+        (and (= tag :int) (= v 0)) [:const :int 0]
+        (and (= tag :float) (= v 0.0)) [:const :float 0.0]
+        :else (case tag
+                :int :int
+                :float :float
+                :any)))
+    (union-type? t)
+    (let [flat (reduce (fn [acc member]
+                         (let [norm (normalize-type member)]
+                           (cond
+                             (= norm :bottom) acc
+                             (= norm :any) (reduced [:any])
+                             (union-type? norm) (into acc (rest norm))
+                             :else (conj acc norm))))
+                       []
+                       (rest t))]
+      (cond
+        (= flat [:any]) :any
+        ;; FAST PATH: a pure-kind union (every member a mask-representable kind)
+        ;; canonicalizes via the bitset lattice in O(members) bit-ors instead of
+        ;; O(members × passes) flatten/dedup/sort/subsume. Exhaustively ≡ the
+        ;; slow path over all 511 kind-subsets (TestZZNormalizeMaskEquiv) and ≡
+        ;; type-join over all 26244 pairs (ti-bitset-proptest). const-zero and
+        ;; :unknown members fall through to preserve their exact semantics.
+        (every? (fn [m] (or (= m :number) (contains? kind-bit m))) flat)
+        (mask->type (reduce (fn [m x] (bit-or m (type->mask x))) 0 flat))
+        :else
+        (let [members0 (distinct flat)
+              has-bool? (some #(= :bool %) members0)
+              has-number? (some #(= :number %) members0)
+              members1 (if has-bool?
+                         (remove (fn [member]
+                                   (or (= member :true) (= member :false)))
+                                 members0)
+                         members0)
+              members2 (if has-number?
+                         (remove (fn [member]
+                                   (or (= member :int)
+                                       (= member :float)
+                                       (= member [:const :int 0])
+                                       (= member [:const :float 0.0])))
+                                 members1)
+                         members1)
+              members3 (if (and (some #(or (= % :int) (= % [:const :int 0])) members2)
+                                (some #(or (= % :float) (= % [:const :float 0.0])) members2))
+                         (conj (remove (fn [member]
+                                         (or (= member :int)
+                                             (= member :float)
+                                             (= member [:const :int 0])
+                                             (= member [:const :float 0.0])))
+                                       members2)
+                               :number)
+                         members2)
+              members4 (if (some #(= :int %) members3)
+                         (remove #(= % [:const :int 0]) members3)
+                         members3)
+              members5 (if (some #(= :float %) members4)
+                         (remove #(= % [:const :float 0.0]) members4)
+                         members4)
+              members6 (vec (sort-members (distinct members5)))]
+          (cond
+            (empty? members6) :bottom
+            (= 1 (count members6)) (first members6)
+            :else (into [:union] members6)))))
+    :else :any))
+
+(defn type-join [a b]
+  ;; Invariant: a and b are already canonical. Every type-join caller either
+  ;; reads from ir/type-of (stored only via set-type-if-changed!, which writes
+  ;; the normalized form) or feeds the result of an infer-* function (those
+  ;; return canonical types directly). Skipping the redundant per-call
+  ;; normalize halves normalize-type invocations on the hot path.
+  (ti-inc! :type-join)
+  (cond
+    (= a b) a
+    (= a :bottom) b
+    (= b :bottom) a
+    (dtype-type? a)
+    (if (dtype-type? b) (if (= a b) a :any) :any)
+    (dtype-type? b)
+    :any
+    (= a :any) :any
+    (= b :any) :any
+    (= a :unknown) :unknown
+    (= b :unknown) :unknown
+    (and (= a :int) (= b [:const :int 0])) :int
+    (and (= b :int) (= a [:const :int 0])) :int
+    (and (= a :float) (= b [:const :float 0.0])) :float
+    (and (= b :float) (= a [:const :float 0.0])) :float
+    (and (= a :bool) (or (= b :true) (= b :false))) :bool
+    (and (= b :bool) (or (= a :true) (= a :false))) :bool
+    (= a :number)
+    (if (or (= b :int) (= b :float) (= b :number)
+            (= b [:const :int 0]) (= b [:const :float 0.0]))
+      :number
+      (normalize-type [:union a b]))
+    (= b :number)
+    (if (or (= a :int) (= a :float) (= a :number)
+            (= a [:const :int 0]) (= a [:const :float 0.0]))
+      :number
+      (normalize-type [:union a b]))
+    (or (and (or (= a :int) (= a [:const :int 0]))
+             (or (= b :float) (= b [:const :float 0.0])))
+        (and (or (= a :float) (= a [:const :float 0.0]))
+             (or (= b :int) (= b [:const :int 0]))))
+    :number
+    :else (normalize-type [:union a b])))
+
+(defn join-all [types]
+  (reduce type-join :bottom types))
+
+(defn- mask-fact [m]
+  {:kind :mask :value m})
+
+(defn- type-fact [t]
+  {:kind :type :value t})
+
+(defn fact-from-type [t]
+  (let [norm (normalize-type t)]
+    (if (maskable-type? norm)
+      (mask-fact (type->mask norm))
+      (type-fact norm))))
+
+(defn fact-type [fact]
+  (cond
+    (nil? fact) :bottom
+    (= :mask (:kind fact)) (mask->type (:value fact))
+    :else (normalize-type (:value fact))))
+
+(defn fact-mask [fact]
+  (when (= :mask (:kind fact))
+    (:value fact)))
+
+(defn join-facts [a b]
+  (cond
+    (nil? a) b
+    (nil? b) a
+    (and (= :mask (:kind a)) (= :mask (:kind b)))
+    (mask-fact (mask-join (:value a) (:value b)))
+    :else
+    (fact-from-type (type-join (fact-type a) (fact-type b)))))
+
+(defn new-typeinfra-state [f]
+  (atom
+    {:inst-facts {}
+     :touched #{}
+     :counters *ti-counters*
+     :cache-meta {:fn-key (ir/fn-name f)
+                  :cache-hit? false}}))
+
+(defn state-fact [state nid]
+  (get (:inst-facts @state) nid))
+
+(defn state-type [state nid]
+  (fact-type (state-fact state nid)))
+
+(defn state-mask [state nid]
+  (fact-mask (state-fact state nid)))
+
+(defn- assoc-state-fact [state nid fact]
+  (swap! state
+         (fn [s]
+           (assoc s
+                  :inst-facts (assoc (:inst-facts s) nid fact)
+                  :touched (conj (:touched s) nid))))
+  state)
+
+(defn seed-state-from-inst-types! [state f]
+  (loop [i 0 insts (:insts @f)]
+    (if (< i (count insts))
+      (let [raw-type (nth (nth insts i) 5)
+            seeded   (if (or (nil? raw-type) (= raw-type :unknown)) :bottom raw-type)]
+        (swap! state update :inst-facts assoc i (fact-from-type seeded))
+        (recur (inc i) insts))
+      state)))
+
+(defn join-inst-type! [state nid t]
+  (let [joined (join-facts (state-fact state nid) (fact-from-type t))]
+    (if (= joined (state-fact state nid))
+      state
+      (assoc-state-fact state nid joined))))
+
+(defn join-inst-mask! [state nid mask]
+  (let [joined (join-facts (state-fact state nid) (mask-fact mask))]
+    (if (= joined (state-fact state nid))
+      state
+      (assoc-state-fact state nid joined))))
+
+(defn flush-state-types! [state f]
+  (doseq [nid (:touched @state)]
+    (ir/set-type! f nid (state-type state nid)))
+  state)

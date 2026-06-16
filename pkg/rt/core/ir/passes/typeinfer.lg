@@ -15,32 +15,28 @@
 
 (ns ir.passes.typeinfer
   (:require
-   [ir.dominance]))
+   [ir.dominance]
+   [ir.lattice :as lat]))
 
-;; --- lattice ---------------------------------------------------------
-
-(def ^:private type-order
-  {:true 0
-   :false 1
-   :bool 2
-   :int 3
-   :float 4
-   :number 5
-   :string 6
-   :char 7
-   :nil 8
-   :unknown 9
-   :any 10
-   :bottom 11})
-
-;; --- diagnostic instrumentation ---
-;; Bind *ti-counters* to an atom-map around a `typeinfer` call to record
-;; per-pass counts (e.g. analyze-block visits, type-join calls). Zero
-;; overhead when nil; used by scripts/ir-stress.lg's `trace` mode to
-;; surface convergence regressions early. See scripts/ir-stress.md.
-(def ^:dynamic *ti-counters* nil)
-(defn- ti-inc! [k]
-  (when *ti-counters* (swap! *ti-counters* update k (fnil inc 0))))
+;; Local aliases for the lifted lattice fns (ir.lattice) so the worklist below
+;; reads unqualified. (`:refer` snapshots nil in the source-load path; a plain
+;; def captures the resolved fn after the require completes.) The dynamic
+;; lat/*ti-counters* is NOT aliased — it must stay the single ir.lattice var so
+;; lat/ti-inc! and the worklist's direct swap!s share one atom; those sites use
+;; lat/*ti-counters* directly.
+(def normalize-type lat/normalize-type)
+(def type-join lat/type-join)
+(def join-all lat/join-all)
+(def union-type? lat/union-type?)
+(def const-type? lat/const-type?)
+(def dtype-type? lat/dtype-type?)
+(def ti-inc! lat/ti-inc!)
+(def fact-from-type lat/fact-from-type)
+(def state-type lat/state-type)
+(def state-mask lat/state-mask)
+(def state-fact lat/state-fact)
+(def join-inst-type! lat/join-inst-type!)
+(def join-inst-mask! lat/join-inst-mask!)
 
 ;; --- deftype constructor registry ---
 ;; Bind to a map {constructor-name-string -> deftype-name-symbol} around a
@@ -63,130 +59,6 @@
                   tsym  (get *deftype-ctor-types* vname)]
               (when tsym [:dtype tsym]))))))))
 
-(defn- union-type? [t]
-  (and (vector? t) (= :union (first t))))
-
-(defn- const-type? [t]
-  (and (vector? t) (= :const (first t))))
-
-(defn- sort-members [members]
-  (sort-by (fn [member]
-             (let [key (if (const-type? member) (nth member 1) member)]
-               (get type-order key 100)))
-           members))
-
-(defn- normalize-type [t]
-  (ti-inc! :normalize)
-  (cond
-    (nil? t) :unknown
-    (keyword? t) t
-    (const-type? t)
-    (let [tag (nth t 1)
-          v   (nth t 2)]
-      (cond
-        (and (= tag :int) (= v 0)) [:const :int 0]
-        (and (= tag :float) (= v 0.0)) [:const :float 0.0]
-        :else (case tag
-                :int :int
-                :float :float
-                :any)))
-    (union-type? t)
-    (let [flat (reduce (fn [acc member]
-                         (let [norm (normalize-type member)]
-                           (cond
-                             (= norm :bottom) acc
-                             (= norm :any) (reduced [:any])
-                             (union-type? norm) (into acc (rest norm))
-                             :else (conj acc norm))))
-                       []
-                       (rest t))]
-      (if (= flat [:any])
-        :any
-        (let [members0 (distinct flat)
-              has-bool? (some #(= :bool %) members0)
-              has-number? (some #(= :number %) members0)
-              members1 (if has-bool?
-                         (remove (fn [member]
-                                   (or (= member :true) (= member :false)))
-                                 members0)
-                         members0)
-              members2 (if has-number?
-                         (remove (fn [member]
-                                   (or (= member :int)
-                                       (= member :float)
-                                       (= member [:const :int 0])
-                                       (= member [:const :float 0.0])))
-                                 members1)
-                         members1)
-              members3 (if (and (some #(or (= % :int) (= % [:const :int 0])) members2)
-                                (some #(or (= % :float) (= % [:const :float 0.0])) members2))
-                         (conj (remove (fn [member]
-                                         (or (= member :int)
-                                             (= member :float)
-                                             (= member [:const :int 0])
-                                             (= member [:const :float 0.0])))
-                                       members2)
-                               :number)
-                         members2)
-              members4 (if (some #(= :int %) members3)
-                         (remove #(= % [:const :int 0]) members3)
-                         members3)
-              members5 (if (some #(= :float %) members4)
-                         (remove #(= % [:const :float 0.0]) members4)
-                         members4)
-              members6 (vec (sort-members (distinct members5)))]
-          (cond
-            (empty? members6) :bottom
-            (= 1 (count members6)) (first members6)
-            :else (into [:union] members6)))))
-    ;; [:dtype T] — a native deftype instance type. Canonical as-is; must be
-    ;; preserved (not collapsed to :any) so the receiver keeps its concrete
-    ;; type for *T field access and devirtualized dispatch.
-    (and (vector? t) (= (first t) :dtype)) t
-    :else :any))
-
-(defn- type-join [a b]
-  ;; Invariant: a and b are already canonical. Every type-join caller
-  ;; either reads from ir/type-of (stored only via set-type-if-changed!,
-  ;; which writes the normalized form) or feeds the result of an infer-*
-  ;; function (those return canonical types directly). Skipping the
-  ;; redundant per-call normalize halves normalize-type invocations on
-  ;; the hot path.
-  (ti-inc! :type-join)
-  (cond
-    (= a b) a
-    (= a :bottom) b
-    (= b :bottom) a
-    (= a :any) :any
-    (= b :any) :any
-    (= a :unknown) :unknown
-    (= b :unknown) :unknown
-    (and (= a :int) (= b [:const :int 0])) :int
-    (and (= b :int) (= a [:const :int 0])) :int
-    (and (= a :float) (= b [:const :float 0.0])) :float
-    (and (= b :float) (= a [:const :float 0.0])) :float
-    (and (= a :bool) (or (= b :true) (= b :false))) :bool
-    (and (= b :bool) (or (= a :true) (= a :false))) :bool
-    (= a :number)
-    (if (or (= b :int) (= b :float) (= b :number)
-            (= b [:const :int 0]) (= b [:const :float 0.0]))
-      :number
-      (normalize-type [:union a b]))
-    (= b :number)
-    (if (or (= a :int) (= a :float) (= a :number)
-            (= a [:const :int 0]) (= a [:const :float 0.0]))
-      :number
-      (normalize-type [:union a b]))
-    (or (and (or (= a :int) (= a [:const :int 0]))
-             (or (= b :float) (= b [:const :float 0.0])))
-        (and (or (= a :float) (= a [:const :float 0.0]))
-             (or (= b :int) (= b [:const :int 0]))))
-    :number
-    :else (normalize-type [:union a b])))
-
-(defn- join-all [types]
-  (reduce type-join :bottom types))
-
 (defn- numeric-type? [t]
   (or (= t :int)
       (= t :float)
@@ -201,16 +73,44 @@
     (some #(= :bottom %) types)
     :bottom
     (every? numeric-type? types)
+    ;; Numeric contagion, matching the let-go/Clojure runtime: a float operand
+    ;; makes the result a float — (+ 1 2.0) => 3.0 (Float), (+ 1 2) => 3 (Int).
+    ;; So a CONCRETE float operand forces :float even mixed with ints or with an
+    ;; ambiguous :number (number+float is float whichever the number turns out
+    ;; to be). Only when no concrete float is present and some operand is the
+    ;; ambiguous {int,float} :number do we stay :number; all-int stays :int.
+    ;; (Previously int+float wrongly yielded :number, which has no native Go
+    ;; type and crashed strict lower-go with "unsupported result type".)
     (cond
-      (every? (fn [t] (or (= t :int) (= t [:const :int 0]))) types) :int
-      (every? (fn [t] (or (= t :float) (= t [:const :float 0.0]))) types) :float
-      (some #(= :number %) types) :number
-      (and (some #(or (= % :float) (= % [:const :float 0.0])) types)
-           (some #(or (= % :int) (= % [:const :int 0])) types)) :number
       (some #(or (= % :float) (= % [:const :float 0.0])) types) :float
+      (some #(= :number %) types) :number
       :else :int)
     :else
     :unknown))
+
+(defn- quot-op-type [types]
+  ;; clojure.core/quot is NOT plain numeric contagion. int/int yields an int
+  ;; (native Go `/` truncates toward zero exactly like quot), so keep it native
+  ;; and precisely typed. ANY other operand mix (float, ratio, :number,
+  ;; :unknown, vm.Value) must be computed by rt.QuotValue at runtime — native
+  ;; float `/` does NOT truncate and a native int/float `/` isn't valid Go — so
+  ;; the result is boxed; type it :unknown (-> vm.Value) so lower-go routes it
+  ;; through the helper instead of emitting a wrong native division.
+  (cond
+    (some #(= :bottom %) types)                            :bottom
+    (every? #(or (= % :int) (= % [:const :int 0])) types)  :int
+    :else                                                  :unknown))
+
+(defn- div-op-type [types]
+  ;; clojure.core// is value-dependent: int/int -> Ratio (or Int when exact),
+  ;; any float -> Float (IEEE division). Only all-float operands give a result
+  ;; with a native Go type (:float -> float64, lowered to native `/`); every
+  ;; other mix (int/int Ratio, mixed Float) is boxed and computed by rt.DivValue
+  ;; at runtime, so type it :unknown (-> vm.Value).
+  (cond
+    (some #(= :bottom %) types)                                :bottom
+    (every? #(or (= % :float) (= % [:const :float 0.0])) types) :float
+    :else                                                       :unknown))
 
 (defn- truthy-type? [t]
   (let [t (normalize-type t)]
@@ -268,9 +168,10 @@
     (= aux true)   :true
     (= aux false)  :false
     (and (integer? aux) (= aux 0)) [:const :int 0]
-    (integer? aux) :int
     (and (float? aux) (= aux 0.0)) [:const :float 0.0]
+    (integer? aux) :int
     (float?   aux) :float
+    (ratio?   aux) :ratio
     (string?  aux) :string
     (char?    aux) :char
     :else          :any))
@@ -300,7 +201,7 @@
                 :else arg-type)
               arg-type)))))))
 
-(defn- target-arg-types [pred-bid target-bid param-pos f]
+(defn- target-arg-types [pred-bid target-bid param-pos f state]
   (let [term (ir/block-term pred-bid f)]
     (if (nil? term)
       []
@@ -310,7 +211,7 @@
           :branch
           (if (= target-bid (ir/branch-target-target aux))
             (let [arg-id   (nth (ir/branch-target-args aux) param-pos)
-                  arg-type (ir/type-of arg-id f)]
+                  arg-type (state-type state arg-id)]
               [(normalize-type arg-type)])
             [])
           :branch-if
@@ -318,34 +219,34 @@
                 ft (ir/cond-target-false aux)
                 tt-types (if (= target-bid (ir/branch-target-target tt))
                            (let [arg-id   (nth (ir/branch-target-args tt) param-pos)
-                                 arg-type (ir/type-of arg-id f)]
+                                 arg-type (state-type state arg-id)]
                              [(normalize-type (refine-edge-arg-type pred-bid target-bid arg-id arg-type f))])
                            [])
                 ft-types (if (= target-bid (ir/branch-target-target ft))
                            (let [arg-id   (nth (ir/branch-target-args ft) param-pos)
-                                 arg-type (ir/type-of arg-id f)]
+                                 arg-type (state-type state arg-id)]
                              [(normalize-type (refine-edge-arg-type pred-bid target-bid arg-id arg-type f))])
                            [])]
             (vec (concat tt-types ft-types)))
           [])))))
 
-(defn- infer-block-param [bid param-pos f]
+(defn- infer-block-param [bid param-pos f state]
   (let [preds (ir/block-preds bid f)]
     (if (seq preds)
       (join-all
         (mapcat (fn [pred-bid]
-                  (target-arg-types pred-bid bid param-pos f))
+                  (target-arg-types pred-bid bid param-pos f state))
                 preds))
       :bottom)))
 
-(defn- arg-seed [inst f]
+(defn- arg-seed [inst f state]
   ;; Seed sources, in priority order:
   ;;   1. Type already stored on the load-arg inst (e.g. by the
   ;;      infer-arg-types backward pass) — strongest signal because it
   ;;      reflects what callers actually pass.
   ;;   2. fn-arg-types metadata, if explicitly populated.
   ;;   3. :unknown.
-  (let [stored    (ir/type-of inst f)
+  (let [stored    (state-type state inst)
         arg-types (ir/fn-arg-types f)
         idx       (ir/aux inst f)]
     (cond
@@ -363,105 +264,32 @@
 (def comparison-ops #{:lt :lte :gt :gte :eq})
 (def numeric-ops #{:add :sub :mul :inc :dec})
 
-(defn infer-one [inst f]
+(defn infer-one [inst f state]
   (let [op   (ir/op inst f)
         refs (ir/refs inst f)]
     (cond
       (= op :const)            (classify-const (ir/aux inst f))
-      (= op :load-arg)         (arg-seed inst f)
+      (= op :load-arg)         (arg-seed inst f state)
       (= op :load-var)         :unknown
       (= op :load-closed)      :unknown
       (= op :call)             (or (call-dtype inst f) :unknown)
-      (= op :block-arg)        (normalize-type (ir/type-of inst f))
+      (= op :block-arg)        (normalize-type (state-type state inst))
       (contains? terminator-ops op) :nil
       (contains? comparison-ops op) :bool
+      (= op :quot)
+      (quot-op-type (map (fn [r] (state-type state r)) refs))
+      (= op :div)
+      (div-op-type (map (fn [r] (state-type state r)) refs))
       (contains? numeric-ops op)
-      (numeric-op-type (map (fn [r] (ir/type-of r f)) refs))
+      (numeric-op-type (map (fn [r] (state-type state r)) refs))
       :else :unknown)))
 
 ;; --- fixpoint driver -------------------------------------------------
 
-(defn- set-type-if-changed! [f inst new-type]
-  ;; Dataflow monotonicity: the stored type is the lattice JOIN of every
-  ;; inference seen so far, never just the most recent. Without the join,
-  ;; type-join(:int, :unknown) = :unknown (absorbing) — combined with
-  ;; raw-replace storage — lets an inst's type oscillate :int ↔ :unknown
-  ;; across worklist iterations as predecessors are re-visited in
-  ;; different orders, and the fixpoint never converges. (Smoking gun in
-  ;; bounded-count: insts 12/20/24/29/… flipped indefinitely.)
-  ;;
-  ;; old-type is already canonical (was the result of a prior join +
-  ;; normalize); we only normalize new-type and the join result.
-  (let [new-type (normalize-type new-type)
-        old-type (ir/type-of inst f)
-        joined   (if (= old-type :bottom)
-                   new-type
-                   (type-join old-type new-type))]
-    (when-not (= old-type joined)
-      (ir/set-type! f inst joined)
-      true)))
-
-(defn- analyze-block! [bid f]
-  (ti-inc! :analyze-block)
-  (let [params (ir/block-params bid f)
-        changed-param?
-        (loop [ps params
-               idx 0
-               changed? false]
-          (if (seq ps)
-            (let [param-id (first ps)
-                  param-type (infer-block-param bid idx f)
-                  param-changed? (set-type-if-changed! f param-id param-type)]
-              (recur (rest ps) (inc idx) (or changed? param-changed?)))
-            changed?))
-        changed-inst?
-        (loop [insts (ir/block-insts bid f)
-               changed? false]
-          (if (seq insts)
-            (let [inst (first insts)
-                  inst-changed? (set-type-if-changed! f inst (infer-one inst f))]
-              (recur (rest insts) (or changed? inst-changed?)))
-            changed?))
-        term (ir/block-term bid f)
-        changed-term?
-        (if (nil? term)
-          false
-          (set-type-if-changed! f term (infer-one term f)))]
-    (or changed-param? changed-inst? changed-term?)))
-
-;; --- sparse worklist solver ------------------------------------------
-;;
-;; The previous algorithm RPO-swept every reachable block until no block
-;; changed. On dispatcher defns (build-if, lower-node!, value-expr, …) the
-;; cost was O(sweeps × blocks × insts) — every sweep re-inferred every
-;; value even though a single widening only invalidates that value's
-;; direct users. Profiles showed typeinfer-pre at >5s on these defns,
-;; dominating total compile time 10× over every other pass.
-;;
-;; This sparse worklist drains in O(widenings × dependents). The lattice
-;; is short (`:bottom → narrow → :union → :any`), so each value widens at
-;; most a small constant number of times. Convergence is bounded by the
-;; total transitive fanout of the seed set, not by sweep count.
-;;
-;; Dependency edges (built once after init, CFG is immutable during the
-;; pass):
-;;   inst-users        v → users where (ir/refs user) contains v
-;;   branch-arg-users  v → [bid pos] when v is the arg at slot `pos` of a
-;;                     terminator that targets `bid`; covers :branch and
-;;                     both edges of :branch-if. (Cond-id refinement is
-;;                     subsumed: refine-edge-arg-type only refines the
-;;                     position where arg-id == cond-id, and that arg-id
-;;                     is necessarily already in branch-arg-users.)
-;;
-;; Block-params get their type via infer-block-param (param inference
-;; owns the write). When a param widens, its dependents are enqueued via
-;; the same propagate-changed! helper used for any other value — a
-;; :block-arg inst's refs may flow into normal users, so the param
-;; widening must propagate transitively.
-;;
-;; Skipping work on :block-arg insts in the `:inst` drain branch is fine:
-;; infer-one on a :block-arg just normalizes-and-returns the stored
-;; type, and that stored type was just written by the `:param` path.
+(defn- join-state-type [state inst new-type]
+  (let [old (state-fact state inst)]
+    (join-inst-type! state inst new-type)
+    [state (not= old (state-fact state inst))]))
 
 (defn- build-deps
   "Return dependency maps for the sparse solver.
@@ -501,23 +329,23 @@
               nil)))))
     {:uses (ir/uses f) :branch-arg-users @bu :param-sources @ps}))
 
-(defn- source-arg-type [source f]
+(defn- source-arg-type [source f state]
   (let [pred-bid  (nth source 0)
         target-bid (nth source 1)
         arg-id    (nth source 2)
-        arg-type  (ir/type-of arg-id f)]
+        arg-type  (state-type state arg-id)]
     (normalize-type
       (refine-edge-arg-type pred-bid target-bid arg-id arg-type f))))
 
-(defn- infer-block-param-from-deps [deps bid param-pos f]
+(defn- infer-block-param-from-deps [deps bid param-pos f state]
   (let [sources (get (:param-sources deps) [bid param-pos])]
     (if (seq sources)
-      (join-all (map (fn [source] (source-arg-type source f)) sources))
+      (join-all (map (fn [source] (source-arg-type source f state)) sources))
       :bottom)))
 
-(defn- param-has-ready-source? [deps bid param-pos f]
+(defn- param-has-ready-source? [deps bid param-pos state]
   (some (fn [source]
-          (not= :bottom (ir/type-of (nth source 2) f)))
+          (not= :bottom (state-type state (nth source 2))))
         (get (:param-sources deps) [bid param-pos])))
 
 (defn- enqueue-entry [queue queued entry]
@@ -550,135 +378,85 @@
         [q s]))))
 
 ;; Per-call wall-clock budget. Defensive guard against pathological
-;; inputs; should never fire under the sparse worklist on real code. If
-;; it does, that's a regression signal, not a normal escape hatch. Bail
-;; cleanly with the current partial result — every assigned type is
-;; sound (monotone-store), lower-go's rt.<Op>Value helper path handles
-;; :any operands correctly. Bind to nil for unbounded execution.
+;; inputs. Bail cleanly with the current partial result — every assigned
+;; type is sound (monotone-store), lower-go's rt.<Op>Value helper path
+;; handles :any operands correctly. Bind to nil for unbounded execution.
 (def ^:dynamic *typeinfer-budget-ms* 2000)
 
+(defn- initial-work-queue [f]
+  (let [items (concat
+                (map (fn [bid]
+                       (map (fn [idx] [:param [bid idx]])
+                            (range (count (ir/block-params bid f)))))
+                     (ir/blocks f))
+                (map (fn [bid]
+                       (concat
+                         (map (fn [nid] [:inst nid]) (ir/block-insts bid f))
+                         (let [term (ir/block-term bid f)]
+                           (if term [[:inst term]] []))))
+                     (ir/blocks f)))
+        flat-items (vec (apply concat items))]
+    [flat-items (set flat-items)]))
+
 (defn typeinfer
-  "Infer Inst.Type for every Inst in the function via a sparse monotone
-   worklist. Each value re-infers only when one of its operand types
-   widens, so the cost is proportional to widenings × dependents rather
-   than sweeps × insts."
-  [f]
-  ;; Reset (unchanged): zero every derived type. Preserves :load-arg
-  ;; pins from infer-arg-types — those are the only inputs that survive
-  ;; across typeinfer invocations.
-  (swap! f update :insts
-         (fn [insts]
-           (vec
-             (map (fn [inst]
-                    (let [op (nth inst 0)
-                          t  (nth inst 5)
-                          new-t (if (and (= op :load-arg)
-                                         (not= t :unknown))
-                                  t
-                                  :bottom)]
-                      (assoc inst 5 new-t)))
-                  insts))))
-  (let [deps-start-ns (System/nanoTime)
-        deps      (build-deps f)
-        start-ns  (System/nanoTime)
-        _         (when *ti-counters*
-                    (swap! *ti-counters*
-                           assoc
-                           :deps-ms
-                           (int (/ (- start-ns deps-start-ns) 1000000))))
-        budget-ns (when *typeinfer-budget-ms*
-                    (* *typeinfer-budget-ms* 1000000))
-        budget-exceeded?
-        (fn []
-          (and budget-ns
-               (> (- (System/nanoTime) start-ns) budget-ns)))]
-    ;; Seed: enqueue every value once. Reachable blocks only — unreachable
-    ;; insts keep :bottom, which is correct (they hold no runtime value).
-    (let [[seed-queue seed-queued]
-          (loop [blocks (ir.dominance/reverse-postorder f)
-                 queue []
-                 queued #{}]
-            (if (empty? blocks)
-              [queue queued]
-              (let [bid (first blocks)
-                    [queue queued]
-                    (loop [ps (ir/block-params bid f)
-                           pos 0
-                           q queue
-                           s queued]
-                      (if (seq ps)
-                        (if (param-has-ready-source? deps bid pos f)
-                          (let [[q2 s2] (enqueue-entry q s [:param [bid pos]])]
-                            (recur (rest ps) (inc pos) q2 s2))
-                          (recur (rest ps) (inc pos) q s))
-                        [q s]))
-                    [queue queued]
-                    (loop [insts (ir/block-insts bid f)
-                           q queue
-                           s queued]
-                      (if (seq insts)
-                        (let [inst (first insts)]
-                          ;; Skip :block-arg insts here: their write is
-                          ;; owned by the :param path. infer-one on
-                          ;; :block-arg is a no-op against monotone
-                          ;; storage, but enqueuing them spuriously
-                          ;; bloats the queue.
-                          (if (= :block-arg (ir/op inst f))
-                            (recur (rest insts) q s)
-                            (let [[q2 s2] (enqueue-entry q s [:inst inst])]
-                              (recur (rest insts) q2 s2))))
-                        [q s]))
-                    term (ir/block-term bid f)
-                    [queue queued] (if (nil? term)
-                                     [queue queued]
-                                     (enqueue-entry queue queued [:inst term]))]
-                (recur (rest blocks) queue queued))))]
-      ;; Drain.
-      (loop [queue seed-queue
-             queued seed-queued
-             budget-tick 0]
-        (cond
-          (and (zero? budget-tick) (budget-exceeded?))
-          (do (println "typeinfer: hit *typeinfer-budget-ms*"
-                       (or *typeinfer-budget-ms* "<nil>")
-                       "— bailing with partial result")
-              (when *ti-counters*
-                (swap! *ti-counters*
-                       assoc
-                       :drain-ms
-                       (int (/ (- (System/nanoTime) start-ns) 1000000))))
-              f)
-          (empty? queue)
-          (do
-            (when *ti-counters*
-              (swap! *ti-counters*
-                     assoc
-                     :drain-ms
-                     (int (/ (- (System/nanoTime) start-ns) 1000000))))
-            f)
-          :else
-          (let [entry  (peek queue)
-                queue  (pop queue)
-                queued (disj queued entry)
-                [queue queued]
-                (case (first entry)
-                  :inst
-                  (let [n (second entry)]
-                    (ti-inc! :process-inst)
-                    (if (set-type-if-changed! f n (infer-one n f))
-                      (do
-                        (ti-inc! :type-change)
-                        (propagate-changed! n deps queue queued))
-                      [queue queued]))
-                  :param
-                  (let [[bid pos] (second entry)
-                        params    (ir/block-params bid f)
-                        param-id  (nth params pos)
-                        new-type  (infer-block-param-from-deps deps bid pos f)]
-                    (ti-inc! :process-param)
-                    (if (set-type-if-changed! f param-id new-type)
-                      (do
-                        (ti-inc! :type-change)
-                        (propagate-changed! param-id deps queue queued))
-                      [queue queued])))]
-            (recur queue queued (if (zero? budget-tick) 127 (dec budget-tick)))))))))
+  "Infer typeinfra facts for every Inst in the function."
+  ([f]
+   (let [state (lat/seed-state-from-inst-types! (lat/new-typeinfra-state f) f)
+         state (typeinfer f state)]
+     (lat/flush-state-types! state f)
+     f))
+  ([f state]
+   (let [deps (build-deps f)
+         [queue0 queued0] (initial-work-queue f)
+         start-ns (System/nanoTime)
+         budget-ns (when *typeinfer-budget-ms*
+                     (* *typeinfer-budget-ms* 1000000))
+         budget-exceeded?
+         (fn []
+           (and budget-ns
+                (> (- (System/nanoTime) start-ns) budget-ns)))]
+     (loop [queue queue0
+            queued queued0
+            s state]
+       (cond
+         (budget-exceeded?)
+         (do
+           (println "typeinfer: hit *typeinfer-budget-ms*"
+                    (or *typeinfer-budget-ms* "<nil>")
+                    "— bailing with partial result")
+           (when lat/*ti-counters*
+             (swap! lat/*ti-counters*
+                    assoc
+                    :drain-ms
+                    (int (/ (- (System/nanoTime) start-ns) 1000000))))
+           s)
+         (empty? queue)
+         (do
+           (when lat/*ti-counters*
+             (swap! lat/*ti-counters*
+                    assoc
+                    :drain-ms
+                    (int (/ (- (System/nanoTime) start-ns) 1000000))))
+           s)
+         :else
+         (let [entry (first queue)
+               queue' (subvec queue 1)
+               queued' (disj queued entry)]
+           (case (first entry)
+             :param
+             (let [[bid param-pos] (second entry)
+                   param-id (nth (ir/block-params bid f) param-pos)
+                   param-type (infer-block-param-from-deps deps bid param-pos f s)
+                   [s' changed?] (join-state-type s param-id param-type)]
+               (if changed?
+                 (let [[q2 qq2] (propagate-changed! param-id deps queue' queued')]
+                   (recur q2 qq2 s'))
+                 (recur queue' queued' s)))
+             :inst
+             (let [nid (second entry)
+                   [s' changed?] (join-state-type s nid (infer-one nid f s))]
+               (if changed?
+                 (let [[q2 qq2] (propagate-changed! nid deps queue' queued')]
+                   (recur q2 qq2 s'))
+                 (recur queue' queued' s)))
+             (recur queue' queued' s))))))))

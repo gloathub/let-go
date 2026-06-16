@@ -1,0 +1,86 @@
+;; ti-baseline.lg — corpus profile for the Phase-2 gate (second half).
+;;
+;; Builds IR for every defn in the IR corpus, then runs typeinfer with a CAPPED
+;; budget (so the known non-convergence function bails instead of hanging) while
+;; binding *ti-counters* — reporting how many joins vs normalize calls (the wide
+;; path masks make O(1)) and the wall-time. Per-file progress so a hang is
+;; visible. Capped budget UNDERcounts the wide-join-heavy functions, so the
+;; wide-join fraction it reports is a conservative lower bound.
+;;
+;;   ./lg scripts/ti-baseline.lg pkg/rt/core/ir build.lg lower.lg ...
+
+(require 'ir.build 'ir.passes.pipeline 'ir.passes.typeinfer 'ir.passes.infer-arg-types)
+
+(def user-args (vec (drop 2 (seq os/args))))
+(def corpus-dir (str (nth user-args 0) "/"))
+(def files (vec (drop 1 user-args)))
+(def CAP 50)   ; ms per-fn typeinfer budget
+
+(defn read-all [path]
+  (try (read-string (str "(do " (slurp path) ")")) (catch e nil)))
+(defn ns-form-of [parsed]
+  (first (filter (fn [x] (and (seq? x) (= (first x) 'ns))) (rest parsed))))
+(defn require-deps! [nf]
+  (when nf
+    (doseq [clause (drop 2 nf)]
+      (when (and (seq? clause) (= (first clause) :require))
+        (doseq [spec (rest clause)] (try (require spec) (catch e nil)))))))
+(defn defn-forms [parsed]
+  (filter (fn [f] (and (seq? f) (let [h (first f)] (or (= h 'defn) (= h 'defn-)))))
+          (rest parsed)))
+(defn expanded-of [form]
+  (let [name-sym   (nth form 1)
+        maybe-doc  (nth form 2)
+        has-doc?   (string? maybe-doc)
+        first-form (if has-doc? (nth form 3) maybe-doc)]
+    (when (vector? first-form)
+      (let [raw-body   (drop (if has-doc? 4 3) form)
+            body-forms (mapv (fn [b] (ir.passes.pipeline/expand-all b)) raw-body)]
+        (apply list 'defn name-sym first-form body-forms)))))
+
+;; Build phase: collect [ns exp build-already?] per defn, with per-file progress.
+;; NOTE: build-fn is construction only (no typeinfer), so it can't hang here.
+(def acc (atom []))
+(doseq [file files]
+  (let [parsed (read-all (str corpus-dir file))]
+    (when parsed
+      (let [nf (ns-form-of parsed)
+            ns-sym (when (and nf (> (count nf) 1)) (nth nf 1))]
+        (when ns-sym (try (eval (list 'in-ns (list 'quote ns-sym))) (catch e nil)))
+        (require-deps! nf)
+        (let [before (count (deref acc))]
+          (doseq [form (defn-forms parsed)]
+            (try
+              (let [exp (expanded-of form)]
+                (when exp
+                  (ir.build/build-fn exp)
+                  (swap! acc conj [ns-sym (nth form 1) exp])))
+              (catch e nil)))
+          (prn {:file file :defns (- (count (deref acc)) before)}))))))
+(in-ns 'user)
+(def jobs (deref acc))
+(prn {:total-jobs (count jobs)})
+
+;; Timed + profiled pass: capped budget, *ti-counters* bound, per-fn time so a
+;; slow fixture is visible. Report total ms + the join/normalize profile.
+(def counters (atom {}))
+(def slow (atom []))
+(def total-ns (atom 0))
+(binding [ir.passes.typeinfer/*typeinfer-budget-ms* CAP
+          ir.lattice/*ti-counters* counters]
+  (doseq [pair jobs]
+    (let [ns-sym (nth pair 0) nm (nth pair 1) exp (nth pair 2)]
+      (binding [*ns* (the-ns ns-sym)]
+        (try
+          (let [ir-fn (ir.build/build-fn exp)]
+            (ir.passes.infer-arg-types/infer-arg-types ir-fn)
+            (let [t0 (System/nanoTime)]
+              (ir.passes.typeinfer/typeinfer ir-fn)
+              (let [dt (- (System/nanoTime) t0)]
+                (swap! total-ns + dt)
+                (when (> dt 5000000) (swap! slow conj [ns-sym nm (quot dt 1000000)])))))
+          (catch e nil))))))
+
+(prn {:typeinfer-total-ms (quot (deref total-ns) 1000000)})
+(prn {:slow-fns->=5ms (deref slow)})
+(prn {:counter-profile (deref counters)})

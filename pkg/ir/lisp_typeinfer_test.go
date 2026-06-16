@@ -162,3 +162,66 @@ func TestTypeInferRefinesTruthyEdgeForMaybeNilArithmetic(t *testing.T) {
 		t.Fatalf("expected truthy-edge arithmetic to infer int\n--- dump ---\n%s", dump)
 	}
 }
+
+func TestLatticePreservesExactDTypeFacts(t *testing.T) {
+	ensureLoader()
+
+	got := runLispExpr(t, `(pr-str
+		[(ir.lattice/normalize-type [:dtype 'Square])
+		 (ir.lattice/type-join [:dtype 'Square] [:dtype 'Square])
+		 (ir.lattice/type-join [:dtype 'Square] :int)])`)
+
+	if string(got.(vm.String)) != "[[:dtype Square] [:dtype Square] :any]" {
+		t.Fatalf("unexpected dtype lattice behavior: %s", got)
+	}
+}
+
+func TestTypeInfraStateSeedsWithoutTouchingInstTypesUntilFlush(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn seeded-add [x y] (+ x y))`)
+
+	passVarCounter++
+	fnVar := fmt.Sprintf("*typeinfra-fn-%d*", passVarCounter)
+	rt.NS(rt.NameCoreNS).Def(fnVar, fn)
+
+	state := runLispExpr(t, fmt.Sprintf(`(let [s (ir.lattice/new-typeinfra-state %s)]
+		(ir.lattice/seed-state-from-inst-types! s %s)
+		(ir.passes.infer-arg-types/infer-arg-types %s s)
+		s)`, fnVar, fnVar, fnVar))
+
+	passVarCounter++
+	stateVar := fmt.Sprintf("*typeinfra-state-%d*", passVarCounter)
+	rt.NS(rt.NameCoreNS).Def(stateVar, state)
+
+	before := lispDump(t, fn)
+	if strings.Contains(before, "v0 = LoadArg ; 0 : int") || strings.Contains(before, "v1 = LoadArg ; 1 : int") {
+		t.Fatalf("expected shared state seeding to avoid direct inst type writes before flush\n--- dump ---\n%s", before)
+	}
+
+	seeded := runLispExpr(t, fmt.Sprintf(`(pr-str
+		[(ir.lattice/state-type %s (ir/fn-load-arg %s 0))
+		 (ir.lattice/state-type %s (ir/fn-load-arg %s 1))])`,
+		stateVar, fnVar, stateVar, fnVar))
+	if string(seeded.(vm.String)) != "[:int :int]" {
+		beforeState := runLispExpr(t, fmt.Sprintf(`(let [s (ir.lattice/new-typeinfra-state %s)]
+			(ir.lattice/seed-state-from-inst-types! s %s)
+			(pr-str
+			  [(ir.lattice/state-type s (ir/fn-load-arg %s 0))
+			   (ir.lattice/state-type s (ir/fn-load-arg %s 1))
+			   (do (ir.lattice/join-inst-type! s (ir/fn-load-arg %s 0) :int)
+			       (ir.lattice/state-type s (ir/fn-load-arg %s 0)))]))`,
+			fnVar, fnVar, fnVar, fnVar, fnVar, fnVar))
+		scan := runLispExpr(t, fmt.Sprintf(`(pr-str
+			(map (fn [i] [(ir/op i %s) (ir/refs i %s)])
+			     (range (ir/inst-count %s))))`, fnVar, fnVar, fnVar))
+		runLispExpr(t, fmt.Sprintf(`(ir.passes.infer-arg-types/infer-arg-types %s)`, fnVar))
+		t.Fatalf("unexpected state seeds: %s\n--- state-debug ---\n%s\n--- scan ---\n%s\n--- dump-after-wrapper ---\n%s", seeded, beforeState, scan, lispDump(t, fn))
+	}
+
+	runLispExpr(t, fmt.Sprintf(`(ir.lattice/flush-state-types! %s %s)`, stateVar, fnVar))
+	after := lispDump(t, fn)
+	if !strings.Contains(after, "v0 = LoadArg ; 0 : int") || !strings.Contains(after, "v1 = LoadArg ; 1 : int") {
+		t.Fatalf("expected flush to materialize inferred arg seeds\n--- dump ---\n%s", after)
+	}
+}

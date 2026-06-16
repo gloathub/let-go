@@ -1,0 +1,113 @@
+;; ti-microbench.lg — per-op cost: real keyword type-join vs mask bit-or.
+;;
+;; Answers the Phase-2 gate's first half: how much cheaper is a single join in
+;; mask space than in the keyword lattice — separately for the COMMON case (hits
+;; type-join's early cond arms) and the WIDE-UNION case (falls to normalize-type,
+;; the path the bitset rewrite targets). Also times the per-call ROUND-TRIP
+;; (type->mask + bit-or + mask->type) to re-confirm the prior "masks only pay
+;; end-to-end" finding.
+;;
+;; Runs on the CURRENT bundle; reads the real private type-join by qualification.
+;;   ./lg scripts/ti-microbench.lg
+
+(require '[ir.lattice])
+(def real-type-join ir.lattice/type-join)
+(def real-sort-members ir.lattice/sort-members)
+
+;; --- candidate mask lattice (same as ti-bitset-proptest, proven ≡ type-join) ---
+(def kind-bit {:nil 0 :true 1 :false 2 :bool 3 :int 4 :float 5 :string 6 :char 7})
+(def mask-any (bit-shift-left 1 8))
+(def mask-unknown (bit-shift-left 1 9))
+(def mask-number (bit-or (bit-shift-left 1 4) (bit-shift-left 1 5)))
+(defn mask-bit? [m b] (not (zero? (bit-and m (bit-shift-left 1 b)))))
+(defn type->mask [t]
+  (cond
+    (= t :bottom) 0
+    (= t :any) mask-any
+    (= t :unknown) mask-unknown
+    (= t :number) mask-number
+    (and (vector? t) (= :union (first t)))
+    (reduce (fn [m mem] (bit-or m (type->mask mem))) 0 (rest t))
+    :else (let [b (get kind-bit t)] (if b (bit-shift-left 1 b) mask-any))))
+(defn mask-join [a b] (bit-or a b))
+(defn mask->type [m]
+  (cond
+    (mask-bit? m 8) :any
+    (mask-bit? m 9) :unknown
+    (zero? m) :bottom
+    :else
+    (let [set? (fn [b] (mask-bit? m b))
+          members (vec (concat
+                         (if (set? 0) [:nil] [])
+                         (if (set? 3) [:bool]
+                             (concat (if (set? 1) [:true] []) (if (set? 2) [:false] [])))
+                         (cond (and (set? 4) (set? 5)) [:number]
+                               (set? 4) [:int] (set? 5) [:float] :else [])
+                         (if (set? 6) [:string] [])
+                         (if (set? 7) [:char] [])))]
+      (cond (empty? members) :bottom
+            (= 1 (count members)) (first members)
+            :else (into [:union] (real-sort-members members))))))
+
+;; --- workloads -------------------------------------------------------------
+;; COMMON: pairs that resolve in type-join's early cond arms (= / bottom / any /
+;; unknown / bool / number) — the bulk of real joins (idempotent re-derivation).
+(def common-pairs
+  [[:int :int] [:int :bottom] [:bottom :int] [:any :int] [:int :unknown]
+   [:bool :true] [:number :int] [:float :float] [:nil :nil] [:int :int]])
+;; WIDE: pairs that miss every fast arm and fall to (normalize-type [:union a b]) —
+;; the expensive path masks replace with one bit-or.
+(def wide-pairs
+  [[:string :char]
+   [[:union :int :string] [:union :float :char]]
+   [[:union :bool :string] [:union :int :char]]
+   [[:union :int :nil] :string]
+   [[:union :true :false :string] [:union :int :char]]
+   [[:union :string :char] [:union :int :float]]
+   [:int :string]
+   [[:union :bool :int :string] [:union :float :char :nil]]])
+
+(defn ms [] (quot (System/nanoTime) 1))   ; ns
+(defn now-ns [] (System/nanoTime))
+
+;; time a thunk over `iters` passes through `pairs`, return total ns
+(defn time-loop [iters pairs f]
+  (let [t0 (now-ns)]
+    (dotimes [_ iters]
+      (doseq [p pairs] (f (nth p 0) (nth p 1))))
+    (- (now-ns) t0)))
+
+;; pre-mask operands so the mask join measures ONLY bit-or (the end-to-end case)
+(defn premask-pairs [pairs] (mapv (fn [p] [(type->mask (nth p 0)) (type->mask (nth p 1))]) pairs))
+
+(def ITERS 20000)
+
+(defn bench [label pairs]
+  (let [n-ops      (* ITERS (count pairs))
+        masked     (premask-pairs pairs)
+        ;; keyword join (real)
+        kw-ns      (time-loop ITERS pairs real-type-join)
+        ;; mask join, operands already in mask space (the end-to-end target)
+        mask-ns    (time-loop ITERS masked mask-join)
+        ;; per-call round-trip: mask everything + join + decode every call
+        rt-ns      (time-loop ITERS pairs
+                              (fn [a b] (mask->type (mask-join (type->mask a) (type->mask b)))))]
+    (println "---" label "(" n-ops "ops )")
+    (println (str "  keyword type-join : " (quot kw-ns n-ops)   " ns/op  (total " (quot kw-ns 1000000) " ms)"))
+    (println (str "  mask bit-or       : " (quot mask-ns n-ops) " ns/op  (total " (quot mask-ns 1000000) " ms)"))
+    (println (str "  round-trip mask   : " (quot rt-ns n-ops)   " ns/op  (total " (quot rt-ns 1000000) " ms)"))
+    (println (str "  speedup (kw/mask) : " (if (zero? mask-ns) "inf" (str (quot (* 100 kw-ns) mask-ns) "%  i.e. " (quot kw-ns (max 1 mask-ns)) "x"))))
+    {:label label :kw kw-ns :mask mask-ns :rt rt-ns :n n-ops}))
+
+(println "ITERS per pair-set:" ITERS)
+(def r-common (bench "COMMON (early cond arms)" common-pairs))
+(def r-wide   (bench "WIDE-UNION (normalize-type path)" wide-pairs))
+
+(println)
+(println "=== GATE READOUT ===")
+(println (str "common: keyword=" (quot (:kw r-common) (:n r-common)) "ns mask=" (quot (:mask r-common) (:n r-common)) "ns  → "
+              (quot (:kw r-common) (max 1 (:mask r-common))) "x"))
+(println (str "wide  : keyword=" (quot (:kw r-wide) (:n r-wide)) "ns mask=" (quot (:mask r-wide) (max 1 (:n r-wide))) "ns  → "
+              (quot (:kw r-wide) (max 1 (:mask r-wide))) "x"))
+(println (str "round-trip vs keyword (wide): " (quot (:rt r-wide) (max 1 (:kw r-wide))) "x the keyword cost"
+              "  (>1 confirms must stay in mask space)"))

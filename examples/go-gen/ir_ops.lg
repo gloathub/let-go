@@ -62,6 +62,8 @@
     ["Add"        2  1 true  false OP_ADD             false "Add"        ""]
     ["Sub"        2  1 true  false OP_SUB             false "Sub"        ""]
     ["Mul"        2  1 true  false OP_MUL             false "Mul"        ""]
+    ["Quot"       2  1 true  false OP_QUOT            false "Quot"       "clojure.core/quot — integer quotient truncated toward zero. int/int lowers to native Go `/` (which truncates identically); any float/ratio/boxed operand lowers via rt.QuotValue (native float `/` does NOT truncate)"]
+    ["Div"        2  1 true  false OP_DIV             false "Div"        "clojure.core// — true division. float/float lowers to native Go `/`; any other operand mix (int/int -> Ratio, mixed -> Float) lowers via rt.DivValue. Distinguished from Quot by op-kw in lower-go (both render Go `/`)"]
     ["Lt"         2  1 true  false OP_LT              false "Lt"         ""]
     ["Lte"        2  1 true  false OP_LTE             false "Lte"        ""]
     ["Gt"         2  1 true  false OP_GT              false "Gt"         ""]

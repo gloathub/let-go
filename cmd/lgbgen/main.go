@@ -61,6 +61,7 @@ var goLoweringNSOrder = []string{
 	"ir.zipper",
 	"ir.passes",
 	"ir.dominance",
+	"ir.lattice",
 	"ir.structurize",
 	"ir.lower",
 	"ir.lower-go",

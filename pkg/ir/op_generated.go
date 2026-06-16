@@ -39,6 +39,8 @@ const (
 	OpAdd
 	OpSub
 	OpMul
+	OpQuot // clojure.core/quot — integer quotient truncated toward zero. int/int lowers to native Go `/` (which truncates identically); any float/ratio/boxed operand lowers via rt.QuotValue (native float `/` does NOT truncate)
+	OpDiv  // clojure.core// — true division. float/float lowers to native Go `/`; any other operand mix (int/int -> Ratio, mixed -> Float) lowers via rt.DivValue. Distinguished from Quot by op-kw in lower-go (both render Go `/`)
 	OpLt
 	OpLte
 	OpGt
@@ -78,6 +80,8 @@ var opTable = [...]opInfo{
 	OpAdd:         {"Add", 2, 1, true, false},
 	OpSub:         {"Sub", 2, 1, true, false},
 	OpMul:         {"Mul", 2, 1, true, false},
+	OpQuot:        {"Quot", 2, 1, true, false},
+	OpDiv:         {"Div", 2, 1, true, false},
 	OpLt:          {"Lt", 2, 1, true, false},
 	OpLte:         {"Lte", 2, 1, true, false},
 	OpGt:          {"Gt", 2, 1, true, false},
@@ -158,6 +162,10 @@ func irOpToBytecode(op Op) int32 {
 		return vm.OP_SUB
 	case OpMul:
 		return vm.OP_MUL
+	case OpQuot:
+		return vm.OP_QUOT
+	case OpDiv:
+		return vm.OP_DIV
 	case OpLt:
 		return vm.OP_LT
 	case OpLte:
@@ -209,6 +217,10 @@ func bytecodeToIROp(op int32) Op {
 		return OpSub
 	case vm.OP_MUL:
 		return OpMul
+	case vm.OP_QUOT:
+		return OpQuot
+	case vm.OP_DIV:
+		return OpDiv
 	case vm.OP_LT:
 		return OpLt
 	case vm.OP_LTE:

@@ -21,6 +21,7 @@
   (:require
    [graph :as g]
    [ir.build]
+   [ir.lattice :as lat]
    [ir.lower :as lower]
    [ir.lower-go :as lower-go]
    [ir.passes.constfold :refer [constfold]]
@@ -31,21 +32,23 @@
    [ir.passes.typeinfer :refer [typeinfer]]
    [ir.validate :refer [validate-fn!]]))
 
+(defn- run-typeinfra-epoch [f]
+  (let [state0 (lat/seed-state-from-inst-types! (lat/new-typeinfra-state f) f)
+        state1 (infer-arg-types f state0)
+        state2 (typeinfer f state1)]
+    (lat/flush-state-types! state2 f)
+    f))
+
 (defn optimize-fn [f]
   (validate-fn! f "build")
-  ;; infer-arg-types walks backward from each load-arg's users. It only
-  ;; needs the op of each user (e.g. :add → :int constraint), not their
-  ;; types — so it can run BEFORE typeinfer and have its seeds picked up
-  ;; by typeinfer's arg-seed in the same pass. One typeinfer sweep.
-  (infer-arg-types f) (validate-fn! f "infer-arg-types")
-  (typeinfer f)
+  (run-typeinfra-epoch f) (validate-fn! f "infer-arg-types")
   (constfold f)        (validate-fn! f "constfold-1")
   (cse f)              (validate-fn! f "cse")
   (constfold f)        (validate-fn! f "constfold-2")
   (licm f)             (validate-fn! f "licm")
   (constfold f)        (validate-fn! f "constfold-3")
   (dce f)              (validate-fn! f "dce")
-  (typeinfer f)
+  (run-typeinfra-epoch f)
   f)
 
 (declare expand-all)

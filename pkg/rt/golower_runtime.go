@@ -188,6 +188,17 @@ func QuotValue(a, b vm.Value) vm.Value {
 	return r
 }
 
+// DivValue is the runtime target for the :div IR op when the operands aren't
+// both native float64 (int/int yields a Ratio, mixed yields Float). Mirrors
+// clojure.core// via vm.NumDiv so the lowered Go path matches the interpreter.
+func DivValue(a, b vm.Value) vm.Value {
+	r, err := vm.NumDiv(a, b)
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
 // BoxRestArgs boxes a variadic rest-args slice into a vm.Value list.
 // Used by the Go lowering when lowering :load-arg for the rest arg of
 // a variadic function (where the Go param is ...vm.Value).

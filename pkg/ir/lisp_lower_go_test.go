@@ -108,6 +108,131 @@ func TestLowerGoStrictArithmeticLowersToFuncDeclAST(t *testing.T) {
 	}
 }
 
+// Regression for PR #235 review (precision): mixed int/float arithmetic obeys
+// numeric contagion — (+ 1 2.0) is a Float at runtime, so its result type is
+// :float, lowering to a native float64. Previously typeinfer joined :int and
+// :float to the ambiguous :number, which has no native Go type and made strict
+// lower-go throw "unsupported result type".
+func TestLowerGoStrictMixedIntFloatInfersNativeFloat(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn mixed [] (+ 1 2.0))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":strict")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status for a mixed int/float result, got %v (reason=%v)",
+			got, result.ValueAt(vm.Keyword("reason")))
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, "float64") {
+		t.Fatalf("expected (+ 1 2.0) to lower with a native float64 result (numeric contagion), got:\n%s", rendered)
+	}
+}
+
+// Regression for PR #235 review (robustness): a genuinely ambiguous :number
+// result — e.g. (+ x x) where x is only known to be {int,float} — has no native
+// Go type, so go-type-spec must give it a lowering target (vm.Value) instead of
+// crashing strict lower-go. This is the backstop for honest :number results
+// that contagion can't narrow.
+func TestLowerGoStrictAmbiguousNumberResultBoxesToValue(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn addn [x] (+ x x))`)
+	seedArgTypes(t, fn, "[:number]")
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":strict")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status for an ambiguous :number result, got %v (reason=%v)",
+			got, result.ValueAt(vm.Keyword("reason")))
+	}
+}
+
+// Regression for PR #235: quot is now a first-class IR op. int/int quot lowers
+// to native Go `/` (Go integer division truncates toward zero exactly like
+// clojure.core/quot) and is typed :int.
+func TestLowerGoStrictQuotIntIntLowersNative(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn qii [x y] (quot x y))`)
+	seedArgTypes(t, fn, "[:int :int]")
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":strict")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status for int/int quot, got %v (reason=%v)",
+			got, result.ValueAt(vm.Keyword("reason")))
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, "/") || strings.Contains(rendered, "QuotValue") {
+		t.Fatalf("expected int/int quot to lower to native Go division, got:\n%s", rendered)
+	}
+}
+
+// Regression for PR #235: a mixed-operand quot can NOT use native Go `/` (float
+// `/` does not truncate; int/float `/` isn't valid Go), so it must route through
+// rt.QuotValue, which truncates per the numeric tower at runtime.
+func TestLowerGoStrictQuotMixedRoutesThroughQuotValue(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn qif [x] (quot x 2.0))`)
+	seedArgTypes(t, fn, "[:int]")
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":strict")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status for mixed quot, got %v (reason=%v)",
+			got, result.ValueAt(vm.Keyword("reason")))
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, "QuotValue") {
+		t.Fatalf("expected mixed int/float quot to route through rt.QuotValue, got:\n%s", rendered)
+	}
+}
+
+// Regression for PR #235: div (/) is a first-class IR op. float/float division
+// has a native Go type (float64) and lowers to native `/` (matches clojure.core//
+// on floats).
+func TestLowerGoStrictDivFloatFloatLowersNative(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn dff [x y] (/ x y))`)
+	seedArgTypes(t, fn, "[:float :float]")
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":strict")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered for float/float div, got %v (reason=%v)",
+			got, result.ValueAt(vm.Keyword("reason")))
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, "/") || strings.Contains(rendered, "DivValue") {
+		t.Fatalf("expected float/float div to lower to native Go division, got:\n%s", rendered)
+	}
+}
+
+// Regression for PR #235: int/int div yields a Ratio (or Int when exact), which
+// has no native Go scalar type, so it must route through rt.DivValue (matching
+// clojure.core//) rather than native Go `/` (which would be integer division).
+func TestLowerGoStrictDivIntIntRoutesThroughDivValue(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn dii [x y] (/ x y))`)
+	seedArgTypes(t, fn, "[:int :int]")
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":strict")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered for int/int div, got %v (reason=%v)",
+			got, result.ValueAt(vm.Keyword("reason")))
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, "DivValue") {
+		t.Fatalf("expected int/int div (Ratio-producing) to route through rt.DivValue, got:\n%s", rendered)
+	}
+}
+
 func TestLowerGoFileRendersFullGoFile(t *testing.T) {
 	ensureLoader()
 
@@ -1035,5 +1160,39 @@ func TestLowerGoDerefUsesCachedVarDispatch(t *testing.T) {
 	}
 	if assertsType(caller.Body, "vm.IDeref") {
 		t.Fatalf("deref must NOT lower to a direct .(vm.IDeref) assertion:\n%s", src)
+	}
+}
+
+func TestLowerGoStrictExactDTypeArgStaysConcrete(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn id-square [x] x)`)
+
+	passVarCounter++
+	fnVar := fmt.Sprintf("*lower-go-dtype-fn-%d*", passVarCounter)
+	rt.NS(rt.NameCoreNS).Def(fnVar, fn)
+
+	runLispExpr(t, fmt.Sprintf(`(let [s (ir.lattice/new-typeinfra-state %s)
+	                                arg0 (ir/fn-load-arg %s 0)]
+	                            (ir.lattice/seed-state-from-inst-types! s %s)
+	                            (ir.lattice/join-inst-type! s arg0 [:dtype 'Square])
+	                            (ir.passes.typeinfer/typeinfer %s s)
+	                            (ir.lattice/flush-state-types! s %s))`,
+		fnVar, fnVar, fnVar, fnVar, fnVar))
+
+	result := lowerGo(t, fn, ":strict")
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status, got %v (reason: %v)", got, result.ValueAt(vm.Keyword("reason")))
+	}
+
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, "arg0 *Square") {
+		t.Fatalf("expected exact dtype arg to lower as *Square, not vm.Value\n--- dump ---\n%s\n--- go ---\n%s", lispDump(t, fn), rendered)
+	}
+	if !strings.Contains(rendered, ") *Square") {
+		t.Fatalf("expected exact dtype return to stay concrete\n--- go ---\n%s", rendered)
+	}
+	if strings.Contains(rendered, "arg0 vm.Value") {
+		t.Fatalf("dtype arg widened back to vm.Value\n--- go ---\n%s", rendered)
 	}
 }
