@@ -232,7 +232,12 @@
           (if (seq? expanded)
             (if (= 'quote (first expanded))
               expanded
-              (apply list (first expanded)
+              ;; Expand the head too: in an immediately-invoked fn expression
+              ;; ((fn [x] ...) args), the head is itself a form that must be
+              ;; expanded (fn -> fn*). Leaving it raw makes the IR builder
+              ;; misread the IIFE as a call and fail to resolve the inner
+              ;; fn's body symbols. For a symbol head, expand-all is identity.
+              (apply list (expand-all (first expanded))
                      (doall (map expand-all (rest expanded)))))
             (expand-all expanded)))))
     (vector? form)
