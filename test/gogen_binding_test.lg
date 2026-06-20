@@ -1,0 +1,34 @@
+;; Regression test for the `binding` / `(var x)` self-AOT lowering gap (RC2).
+;;
+;; Root cause: `binding` macroexpands to push-binding!/pop-binding! calls
+;; around a try/finally. The try/finally already lowers; the calls already
+;; lower as trampolines. The single piece that did NOT lower was `(var sym)`:
+;; build-var emits a :const whose aux is a live *vm.Var, and lower_go's
+;; const renderers (const-expr / boxed-value-expr) both `:else nil` on a Var
+;; value -> :fallback. So any binding form (and any bare (var x)) bailed.
+;;
+;; Fix: render a Var-valued const as rt.LookupVar(ns,name) (the same primitive
+;; load-var already uses). This is shared with RC1 (set!'s var operand).
+;;
+;; RED before the fix: :fallback. GREEN after: :lowered. Mirrors the real
+;; bucket defns pipeline.lg :: compile-form*, lower-ns-to-go.
+
+(ns test.gogen-binding-test
+  (:require
+   [ir.passes.pipeline :as pipeline]
+   [test :refer :all]))
+
+(def ^:dynamic *bd-flag* nil)
+
+(defn- lower-status [form]
+  (binding [pipeline/*target* :go]
+    (:status (pipeline/compile-form form))))
+
+(deftest var-form-lowers
+  (testing "a bare (var x) reference lowers to rt.LookupVar instead of falling back"
+    (is (= :lowered (lower-status '(defn bd-thevar [] (var *bd-flag*)))))))
+
+(deftest binding-form-lowers
+  (testing "a (binding [*v* x] body) form lowers cleanly"
+    (is (= :lowered (lower-status '(defn bd-with [x]
+                                     (binding [*bd-flag* x] (if *bd-flag* 1 0))))))))

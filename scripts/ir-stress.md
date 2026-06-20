@@ -41,9 +41,10 @@ LG_STRESS_PASSES=1 LG_STRESS_LOG=/tmp/ir-stress.log \
     test.lg check.lg data.lg graph.lg zip.lg \
     ir/zipper.lg ir/build.lg ir/lower.lg ir/lower_go.lg ir/passes.lg \
     ir/dominance.lg ir/dump.lg ir/validate.lg ir/data.lg \
+    ir/data/generated.lg ir/lattice.lg ir/structurize.lg \
     ir/passes/constfold.lg ir/passes/cse.lg ir/passes/dce.lg \
     ir/passes/typeinfer.lg ir/passes/licm.lg ir/passes/pipeline.lg \
-    ir/passes/mutability.lg ir/passes/trace.lg
+    ir/passes/mutability.lg ir/passes/trace.lg ir/passes/infer_arg_types.lg
 
 # Drill into ONE slow defn
 go run . scripts/ir-stress.lg trace pkg/rt/core core.lg for-emit

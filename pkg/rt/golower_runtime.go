@@ -99,6 +99,15 @@ func MakeNativeMultiArity(fns []vm.Value) vm.Value {
 // then vm.Num<X> fallback. NumX errors panic to match bytecode behavior
 // when no error handler is installed.
 
+// EqValue implements Clojure value-equality (the = operator / OP_EQ) for the
+// lowered Go path. Unlike Go's ==, it is safe on non-comparable dynamic types
+// (vectors, maps, seqs) and compares by value, not interface identity. The
+// lowerer routes = through here whenever an operand is vm.Value (it could hold a
+// collection); concrete comparable scalars keep native Go ==.
+func EqValue(a, b vm.Value) bool {
+	return vm.ValueEquals(a, b)
+}
+
 func LtValue(a, b vm.Value) bool {
 	if ai, ok := a.(vm.Int); ok {
 		if bi, ok := b.(vm.Int); ok {

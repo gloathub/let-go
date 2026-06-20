@@ -139,6 +139,17 @@ perf-snapshot: lowered $(GO)
 lowered: $(GO)
 	@go run -tags bootstrap ./cmd/lgbgen --target=go >/dev/null
 
+# Differential self-AOT execution gate: build let-go twice (bytecode + the
+# -tags gogen_ir native), run each test/gold-aot/*.lg fixture under both, and
+# diff the last output line. A new cross-engine divergence fails; the
+# shrink-only allowlist test/gogen_aot_xfail.txt tracks known ones. `lowered`
+# keeps the gogen_ir tree fresh so the native build reflects current sources.
+# Re-seed the allowlist (after a reviewed change) with:
+#   LETGO_AOT_REDERIVE=1 go test -run TestGogenAOTDiff -count=1 ./test/e2e/
+.PHONY: gogen-diff
+gogen-diff: lowered $(GO)
+	go test -run TestGogenAOTDiff -count=1 -v ./test/e2e/
+
 # Default gate (~1 min): the jank suite under BOTH VM variants (bytecode +
 # gogen_ir-lowered) + the calibration anchor. This is what CI runs.
 bench-ratchet: lowered $(GO)
@@ -265,6 +276,16 @@ fanout-ratchet-update: build
 
 fanout-ratchet-show: build
 	./lg scripts/fanout-ratchet.lg show --go "$$(command -v go)"
+
+# IR-stress: lower-go AOT pass-rate over the committed corpus allow-list
+# (scripts/ir-stress-corpus.edn = every shipped + test/example/script .lg minus
+# :exclude). Failures are real lowering gaps. Env overridable: LG_STRESS_PASSES
+# (default 1), LG_STRESS_TIMEOUT_MS (15000), LG_STRESS_LOG (/tmp/ir-stress.log).
+ir-stress: build
+	LG_STRESS_PASSES=$${LG_STRESS_PASSES:-1} \
+	  LG_STRESS_TIMEOUT_MS=$${LG_STRESS_TIMEOUT_MS:-15000} \
+	  LG_STRESS_LOG=$${LG_STRESS_LOG:-/tmp/ir-stress.log} \
+	  ./lg scripts/ir-stress.lg corpus scripts/ir-stress-corpus.edn
 
 # Combined speed + size gates. Both ratchets need the gogen_ir lowered tree, and
 # each would otherwise regenerate it (the dominant cost). `ratchets` regenerates

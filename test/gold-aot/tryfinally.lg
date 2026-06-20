@@ -1,0 +1,4 @@
+;; try/finally ordering
+(def lg (atom []))
+(try (swap! lg conj :body) (finally (swap! lg conj :fin)))
+(println @lg)

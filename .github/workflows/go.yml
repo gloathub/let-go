@@ -143,6 +143,24 @@ jobs:
           echo "${{ steps.clj.outputs.version }}" > .gold-clojure-version
           echo "Goldens verified against Clojure ${{ steps.clj.outputs.version }}."
 
+  # Differential self-AOT execution gate: builds let-go twice (bytecode +
+  # -tags gogen_ir native) and diffs the output of every test/gold-aot/*.lg
+  # fixture across the two engines. A new cross-engine divergence fails the PR;
+  # known divergences are tracked in the shrink-only test/gogen_aot_xfail.txt.
+  gogen-diff:
+    name: gogen-diff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: make gogen-diff
+        run: make gogen-diff
+
   # Single gate for every generated artifact (Policy: docs/contribution-policy.md §3):
   # the bundle is verified in lockstep with pkg/rt/core/**/*.lg (content-based, so
   # it survives a fresh checkout where mtimes are arbitrary), and the committed

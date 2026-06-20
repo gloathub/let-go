@@ -1,0 +1,18 @@
+;; P1 (straight-line): a value read from a mutable Var into a local must not be
+;; re-read after an intervening set! in straight-line (non-if) code. The bytecode
+;; VM snapshots the value when the load executes, so each `x` below must be the
+;; PRE-set! value. Before the fix, gogen_ir re-emitted ec.Deref(rt.LookupVar(...))
+;; at the use site AFTER the set!, printing the mutated value (99 / 109) and
+;; diverging from the VM. Complements setvar_load_stability.lg (the if-branch shape).
+(def ^:dynamic *x* 1)
+(println
+  ;; bare use after set!  => 1, not 99
+  (binding [*x* 1]
+    (let [x *x*]
+      (set! *x* 99)
+      x))
+  ;; use inside an expression after set!  => 15, not 109
+  (binding [*x* 5]
+    (let [x *x* y 10]
+      (set! *x* 99)
+      (+ x y))))

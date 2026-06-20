@@ -235,6 +235,12 @@
         (into #{} (mapcat #(captures-of % known-locals) form))))
     (vector? form)
     (into #{} (mapcat #(captures-of % known-locals) form))
+    (map? form)
+    ;; Mirror free-vars: a value captured only inside a map literal must be
+    ;; walked too, else loop-header threading (build-loop) misses it and emits
+    ;; a cross-block direct ref to an out-of-scope InstId (same failure class
+    ;; as the cluster-A bugs, for a non-cheap captured value).
+    (into #{} (mapcat #(captures-of % known-locals) (concat (keys form) (vals form))))
     :else #{}))
 
 ;; --- form dispatch -------------------------------------------------------
@@ -357,6 +363,10 @@
         :else
         (into #{} (mapcat #(free-vars % bound) form))))
     (vector? form)
+    (into #{} (mapcat #(free-vars % bound) form))
+    (map? form)
+    (into #{} (mapcat #(free-vars % bound) (concat (keys form) (vals form))))
+    (seq? form)
     (into #{} (mapcat #(free-vars % bound) form))
     :else #{}))
 
@@ -497,6 +507,31 @@
                   (build-form head ctx))]
     (build-call-with-head fn-id (rest form) ctx)))
 
+(defn- method-call-head?
+  "True for Go method-interop heads like .WriteString — an UNQUALIFIED symbol
+   whose name starts with '.' and has a member name after it. Mirrors the
+   bytecode rewrite guard in pkg/compiler/compiler.go (fnsym[0]=='.' && len>1),
+   which matches on the RAW symbol text: a namespace-qualified head such as
+   (foo/.bar x) is an ordinary var call, NOT method interop, so the head must
+   be unqualified."
+  [head]
+  (and (symbol? head)
+       (nil? (namespace head))
+       (let [hn (name head)]
+         (and (> (count hn) 1) (= "." (subs hn 0 1))))))
+
+(defn- rewrite-method-call
+  "(.Method recv arg...) -> (. recv (quote Method) arg...), the canonical
+   dot form that clojure.core/. dispatches via Receiver/InvokeMethod. This
+   mirrors compiler.go's member rewrite so the self-AOT gogen path lowers
+   Go method-call interop the same way the bytecode VM compiles it: as a
+   generic call to the `.` builtin (which lowers via the normal trampoline)."
+  [form]
+  (let [member (symbol (subs (name (first form)) 1))
+        recv   (first (rest form))
+        args   (rest (rest form))]
+    (cons '. (cons recv (cons (list 'quote member) args)))))
+
 (defn build-list [form ctx]
   (let [head    (first form)
         builtin (get builtin-ops head)]
@@ -514,6 +549,10 @@
       (= head 'fn*)   (build-fn* form ctx)
       (= head 'try)   (build-try form ctx)
       (= head '.)     (build-dot form ctx)
+      ;; Go method-call interop: (.Method recv arg...). Rewrite to the
+      ;; canonical dot form and build as a generic call to `.`.
+      (and (method-call-head? head) (seq (rest form)))
+      (build-call (rewrite-method-call form) ctx)
       builtin         (build-builtin-op builtin form ctx)
       ;; Keywords, numbers, strings are callable (implement IFn in Clojure).
       ;; Treat them as Const values, build as generic call with const head.
@@ -667,10 +706,11 @@
 
 (defn build-if [form ctx]
   "if emits BranchIf with then/else BranchTargets and a join block.
-   Each child block gets BlockArg params for the captures it needs
-   from the parent scope (computed by captures-of). The BranchIf
-   passes those captured values via BranchTarget.args. Result: no
-   cross-block direct refs in IR built from if.
+   Non-cheap captures (values that cannot be re-emitted at use site)
+   get BlockArg params in the child blocks so the lowerer can find them.
+   Cheap-load captures (:const/:load-arg/:load-var/:load-closed) are
+   referenced directly as function-scoped locals — the lowerer re-emits
+   them at use site, so no block-arg threading is needed.
 
    Either branch may evaluate to TERMINATED (e.g. its body ends in recur);
    in that case we DON'T emit a branch-to-join for that branch and DON'T
@@ -681,41 +721,38 @@
         else-form (first rest-form)  ; nil when (if test then) — else omitted
         f         (ctx-fn ctx)
         entry-blk (ctx-block ctx)
-        ;; Pass ALL current locals as branch-target args (symmetric).
-        ;; Reason: a downstream `recur` (or any control-flow that later
-        ;; passes parent-scope values back) needs those values to be in
-        ;; scope inside the branch blocks. captures-of only sees direct
-        ;; references in the if's BODIES, so a loop-invariant referenced
-        ;; ONLY in the loop header's test would be dropped — then recur
-        ;; from inside the if-else couldn't reference it. Passing all
-        ;; locals is the simpler invariant; DCE drops anything the
-        ;; branch doesn't actually need. Symmetric args let both
-        ;; targets enter with the same param layout.
-        ;;
-        ;; Sort by InstId so the args appear in parent-stack order: the
-        ;; lower's skip-prefix fast path then matches and no DUP_NTH
-        ;; reordering is emitted in the common case.
+        ;; Sort ALL current locals by InstId (parent-stack order).
         locals-map (current-locals-flat ctx)
         all-caps   (vec (sort-by (fn [sym] (get locals-map sym))
                           (keys locals-map)))
+        ;; Separate cheap (function-scoped) from non-cheap captures.
+        ;; Cheap ops can be re-emitted at any use site; they never need
+        ;; block-arg threading across block edges.
+        non-cheap-caps (vec (remove (fn [sym]
+                                      (let [o (ir/op (get locals-map sym) f)]
+                                        ;; :load-var excluded — var roots are mutable; a set!
+                                        ;; between the load and a later use would let a re-emitted
+                                        ;; rt.LookupVar read the new value, so it must stay threaded.
+                                        (and (ir/op-cheap-load? o) (not= o :load-var))))
+                                    all-caps))
         ;; Create blocks for then, else, join.
         then-blk  (ir/add-block f)
         else-blk  (ir/add-block f)
         join-blk  (ir/add-block f)
-        ;; Emit one BlockArg per capture in each child block — identical
-        ;; shape across both branches.
+        ;; Emit BlockArg params only for non-cheap captures — identical
+        ;; shape across both branches (symmetric layout invariant).
         then-params (mapv (fn [sym]
                             (let [pid (add-inst! ctx then-blk :block-arg [] (count (ir/block-params then-blk f)))]
                               (ir/add-block-param! f then-blk pid)
                               (ir/add-source-info! f pid (ir/new-named-source-info (str sym)))
                               pid))
-                          all-caps)
+                          non-cheap-caps)
         else-params (mapv (fn [sym]
                             (let [pid (add-inst! ctx else-blk :block-arg [] (count (ir/block-params else-blk f)))]
                               (ir/add-block-param! f else-blk pid)
                               (ir/add-source-info! f pid (ir/new-named-source-info (str sym)))
                               pid))
-                          all-caps)
+                          non-cheap-caps)
         ;; Materialize the test in the parent block.
         test-id   (build-form test-form ctx)
         ;; If the test contained control flow (e.g. `and` → nested if),
@@ -723,10 +760,8 @@
         ;; block where the test *finished* — that is where the BranchIf
         ;; must live.
         entry-blk (ctx-block ctx)
-        ;; Look up each capture's parent-scope InstId — same args go to
-        ;; both BranchTargets (symmetric layout invariant; validate.lg
-        ;; enforces this post-build).
-        bt-args   (mapv (fn [sym] (lookup-local ctx sym)) all-caps)
+        ;; Branch-target args carry only non-cheap captures (symmetric).
+        bt-args   (mapv (fn [sym] (lookup-local ctx sym)) non-cheap-caps)
         true-bt   (ir/new-branch-target then-blk bt-args)
         false-bt  (ir/new-branch-target else-blk bt-args)
         cond-aux  (ir/new-cond-target true-bt false-bt)
@@ -736,15 +771,16 @@
     ;; --- then branch ---
     (ctx-set-block! ctx then-blk)
     (push-locals! ctx)
-    (doseq [[sym pid] (map vector all-caps then-params)]
+    ;; Bind only non-cheap captures to their block-arg params.
+    ;; Cheap captures are accessed as function-scoped locals (direct refs).
+    (doseq [[sym pid] (map vector non-cheap-caps then-params)]
       (bind-local! ctx sym pid))
     (let [then-val (build-form then-form ctx)
           then-end (ctx-block ctx)
           then-terminated? (terminated? then-val)
-          ;; Capture each cap's current scope-binding BEFORE pop-locals!
-          ;; so we send the then-branch's BlockArg (not the parent stale).
+          ;; Collect non-cheap cap values BEFORE pop-locals!
           then-cap-vals (when-not then-terminated?
-                          (mapv (fn [sym] (lookup-local ctx sym)) all-caps))]
+                          (mapv (fn [sym] (lookup-local ctx sym)) non-cheap-caps))]
       (pop-locals! ctx)
       (when-not then-terminated?
         (add-terminator! ctx then-end :branch []
@@ -754,13 +790,13 @@
       ;; --- else branch ---
       (ctx-set-block! ctx else-blk)
       (push-locals! ctx)
-      (doseq [[sym pid] (map vector all-caps else-params)]
+      (doseq [[sym pid] (map vector non-cheap-caps else-params)]
         (bind-local! ctx sym pid))
       (let [else-val (build-form else-form ctx)
             else-end (ctx-block ctx)
             else-terminated? (terminated? else-val)
             else-cap-vals (when-not else-terminated?
-                            (mapv (fn [sym] (lookup-local ctx sym)) all-caps))]
+                            (mapv (fn [sym] (lookup-local ctx sym)) non-cheap-caps))]
         (pop-locals! ctx)
         (when-not else-terminated?
           (add-terminator! ctx else-end :branch []
@@ -772,18 +808,19 @@
           (and then-terminated? else-terminated?) TERMINATED
           :else
           (do (ctx-set-block! ctx join-blk)
-              ;; Slot 0 = merged result. Slots 1..N = re-bound captures.
+              ;; Slot 0 = merged result. Slots 1..N = re-bound non-cheap captures.
+              ;; Cheap captures are not given join block-args — code after the if
+              ;; references them directly as function-scoped locals.
               (let [merged (add-inst! ctx join-blk :block-arg [] 0)
                     _      (ir/add-block-param! f join-blk merged)
                     cap-pids (mapv (fn [i]
                                      (let [pid (add-inst! ctx join-blk :block-arg [] (inc i))]
                                        (ir/add-block-param! f join-blk pid)
-                                       (ir/add-source-info! f pid (ir/new-named-source-info (str (nth all-caps i))))
+                                       (ir/add-source-info! f pid (ir/new-named-source-info (str (nth non-cheap-caps i))))
                                        pid))
-                                   (range (count all-caps)))]
-                ;; Rebind in the CURRENT top scope so future lookup-local
-                ;; in this lexical scope finds the join's BlockArg first.
-                (doseq [[sym pid] (map vector all-caps cap-pids)]
+                                   (range (count non-cheap-caps)))]
+                ;; Rebind non-cheap captures to the join's BlockArgs.
+                (doseq [[sym pid] (map vector non-cheap-caps cap-pids)]
                   (rebind-local! ctx sym pid))
                 merged)))))))
 
@@ -811,8 +848,16 @@
         body-caps (vec (reduce (fn [acc bf] (into acc (captures-of bf known)))
                                #{}
                                body))
-        n-caps    (count body-caps)
-        ;; Total header param count = n-slots (loop vars) + n-caps (captures).
+        ;; Cheap-load captures (LoadArg/Var/Const/LoadClosed) don't need
+        ;; block-arg threading in the loop header — the lowerer re-emits them
+        ;; at use site as function-scoped locals.
+        non-cheap-body-caps (vec (remove (fn [sym]
+                                           (let [o (ir/op (lookup-local ctx sym) f)]
+                                             ;; :load-var excluded — mutable var root must stay threaded (P1).
+                                             (and (ir/op-cheap-load? o) (not= o :load-var))))
+                                         body-caps))
+        n-non-cheap-caps    (count non-cheap-body-caps)
+        ;; Total header param count = n-slots (loop vars) + n-non-cheap-caps.
         header    (ir/add-block f)
         ;; Emit BlockArg + Param for each loop-var slot (positions 0..n-slots-1).
         loop-param-ids (mapv (fn [i]
@@ -821,22 +866,22 @@
                                  (ir/add-source-info! f pid (ir/new-named-source-info (str (nth bindings (* i 2)))))
                                  pid))
                              (range n-slots))
-        ;; Emit BlockArg + Param for each capture (positions n-slots..n-slots+n-caps-1).
+        ;; Emit BlockArg + Param for each non-cheap capture (positions n-slots..n-slots+n-non-cheap-caps-1).
         cap-param-ids  (mapv (fn [i]
                                (let [pid (add-inst! ctx header :block-arg [] (+ n-slots i))]
                                  (ir/add-block-param! f header pid)
-                                 (ir/add-source-info! f pid (ir/new-named-source-info (str (nth body-caps i))))
+                                 (ir/add-source-info! f pid (ir/new-named-source-info (str (nth non-cheap-body-caps i))))
                                  pid))
-                             (range n-caps))
+                             (range n-non-cheap-caps))
         ;; Evaluate initial values in the PRE-loop block. Each build-form
         ;; can switch ctx-block if the init expression contains nested
         ;; control flow, so we must re-read ctx-block AFTER building all
         ;; inits and terminate THAT block — not the block we entered with.
         init-vals (mapv (fn [i] (build-form (nth bindings (inc (* i 2))) ctx))
                         (range n-slots))
-        ;; Look up each capture's parent-scope InstId.
-        cap-vals  (mapv (fn [sym] (lookup-local ctx sym)) body-caps)
-        ;; Branch entry-end → header(init-vals ++ cap-vals).
+        ;; Look up non-cheap captures' parent-scope InstIds.
+        cap-vals  (mapv (fn [sym] (lookup-local ctx sym)) non-cheap-body-caps)
+        ;; Branch entry-end → header(init-vals ++ non-cheap-cap-vals).
         bt        (ir/new-branch-target header (vec (concat init-vals cap-vals)))
         entry-end (ctx-block ctx)
         _         (add-terminator! ctx entry-end :branch [] bt)
@@ -847,11 +892,11 @@
     ;; Bind each loop var to its loop-var-param.
     (doseq [i (range n-slots)]
       (bind-local! ctx (nth bindings (* i 2)) (nth loop-param-ids i)))
-    ;; Bind each capture symbol to its capture-param. (So body code
-    ;; references the header's BlockArg, not the parent's InstId.)
-    (doseq [[sym pid] (map vector body-caps cap-param-ids)]
+    ;; Bind only non-cheap captures to their header-param BlockArgs.
+    ;; Cheap captures remain as function-scoped locals (direct cross-block refs).
+    (doseq [[sym pid] (map vector non-cheap-body-caps cap-param-ids)]
       (rebind-local! ctx sym pid))
-    ;; Stash :loop-header + capture metadata so recur can find them.
+    ;; Stash :loop-header + non-cheap capture metadata so recur can find them.
     ;; We stash the SYMBOLS (not their header-param InstIds) so that
     ;; build-recur looks them up against the CURRENT lexical scope —
     ;; build-if rebinds captures to its branch BlockArgs, and recur
@@ -860,7 +905,7 @@
     ;; Use a stack (conj/pop) so nested loops don't clobber outer state.
     (reset! ctx (-> @ctx
                     (update :loop-headers (fn [s] (conj (or s []) header)))
-                    (update :loop-capture-syms-stack (fn [s] (conj (or s []) body-caps)))))
+                    (update :loop-capture-syms-stack (fn [s] (conj (or s []) non-cheap-body-caps)))))
     ;; Build body.
     (let [pre-locals (current-locals-flat ctx)
           result (loop [fs body last-val nil]

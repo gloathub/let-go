@@ -1,0 +1,36 @@
+;; Regression test for the Go method-call interop self-AOT lowering gap.
+;;
+;; Root cause: ir.build/build-list had no dispatch for a call head that is a
+;; symbol starting with '.' (Go method interop, e.g. (.WriteString w s)). It
+;; fell through to symbol resolution and threw "ir/build: unresolved symbol
+;; .WriteString". The bytecode VM handles this by rewriting (.Method recv args)
+;; to the canonical dot form (. recv (quote Method) args); the fix mirrors that
+;; rewrite in build-list so the gogen path lowers interop the same way (a
+;; generic call to the `.` builtin via the normal trampoline).
+;;
+;; RED before the fix: compile-form returns :fallback (unresolved symbol
+;; .WriteString / .UnixMilli). GREEN after: :lowered. Trigger forms are
+;; self-contained so the test stays valid regardless of which real defns hit
+;; the bucket.
+
+(ns test.gogen-method-interop-test
+  (:require
+   [ir.passes.pipeline :as pipeline]
+   [test :refer :all]))
+
+(defn- lower-status [form]
+  (binding [pipeline/*target* :go]
+    (:status (pipeline/compile-form form))))
+
+(deftest go-method-interop-lowers
+  (testing "a (.Method recv args) interop call lowers cleanly instead of throwing unresolved symbol"
+    (is (= :lowered (lower-status '(defn writes [w s] (.WriteString w s)))))
+    (is (= :lowered (lower-status '(defn millis [inst] (.UnixMilli inst)))))))
+
+(deftest qualified-dot-head-is-not-method-interop
+  (testing "(foo/.bar x) — a namespace-qualified head whose name starts with '.' — is an ordinary var call, NOT Go method interop, matching the bytecode compiler's raw-symbol guard"
+    ;; Before the fix, (name 'foo/.bar) => ".bar" misclassified this as method
+    ;; interop and it lowered to a (. x (quote bar)) dot call. After the fix the
+    ;; head must be unqualified, so a qualified head falls through to normal
+    ;; (here: unresolved) symbol resolution and does NOT lower as interop.
+    (is (not= :lowered (lower-status '(defn call-qualified [o] (foo/.bar o)))))))

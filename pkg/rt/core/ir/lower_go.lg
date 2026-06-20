@@ -103,8 +103,26 @@
     (when spec
       (gogen/type spec))))
 
+(defn- var-const-expr [v]
+  ;; A :const whose aux is a live *vm.Var (from (var x), the #'x reader macro,
+  ;; or a set! var operand). Recover it in generated Go via
+  ;; rt.LookupVar(ns,name) — the same primitive load-var uses. The Var prints
+  ;; as "#'ns/name"; parse ns/name through the symbol reader so a qualified
+  ;; name splits exactly the way load-var's aux symbol does (e.g. core// ).
+  (let [sym (symbol (subs (str v) 2))
+        vns (or (namespace sym) "core")
+        vn  (name sym)]
+    (gogen/call
+      (gogen/field-sel (gogen/ident "rt") "LookupVar")
+      [(gogen/string-lit vns) (gogen/string-lit vn)])))
+
 (defn- const-expr [aux t]
   (cond
+    ;; var? MUST come first: a *vm.Var's Type() delegates to its VALUE's type,
+    ;; so a var holding a keyword/int/string/etc. ALSO satisfies keyword?/
+    ;; integer?/… — without this it would lower to that literal (or, for the
+    ;; keyword? case, to nil) instead of rt.LookupVar. See boxed-value-expr.
+    (var? aux)        (var-const-expr aux)
     (nil? aux)        (gogen/ident "nil")
     (= aux true)      (gogen/ident "true")
     (= aux false)     (gogen/ident "false")
@@ -204,6 +222,13 @@
 
 (defn- boxed-value-expr [v]
   (cond
+    ;; var? MUST come first: a *vm.Var's Type() delegates to its VALUE's type,
+    ;; so a var holding a keyword/int/string/etc. ALSO satisfies keyword?/
+    ;; integer?/… and would be mis-lowered to that literal instead of
+    ;; rt.LookupVar. e.g. (binding [*target* :go] …) → (var *target*) where
+    ;; *target* holds :bytecode: keyword? is true, so the var operand to
+    ;; push-binding! lowered to vm.Keyword(…) and push-binding! got a non-Var.
+    (var? v)        (var-const-expr v)
     (nil? v)        (vm-sel "NIL")
     (= v true)      (vm-sel "TRUE")
     (= v false)     (vm-sel "FALSE")
@@ -274,20 +299,39 @@
        (str "v" nid))))
 
 ;; Munge Lisp-idiomatic identifier chars to a valid Go identifier.
-;; Convention is Clojure-flavoured: each unsafe char maps to a distinct
-;; underscore-bracketed token so munged names don't collide with
-;; legitimately-named Go identifiers like `foo_bang` already in source.
+;; This is the canonical Clojure CHAR_MAP (clojure.lang.Compiler/CHAR_MAP),
+;; matched verbatim against glojure's runtime munge (pkg/runtime/rtcompat.go):
+;; each unsafe char maps to a distinct underscore-bracketed token so munged
+;; names don't collide with legitimately-named Go identifiers already in
+;; source. Any char NOT in this map is handled by the go-name fallback below
+;; (alphanumerics/underscore pass through; everything else becomes _U<hex>_),
+;; so an unmapped char can never leak through and produce an invalid Go
+;; identifier (the historic :gogen/bad-identifier failure class).
 (def go-name-munge-map
   {\-  "_"
-   \!  "_BANG_"
-   \?  "_QMARK_"
-   \*  "_STAR_"
-   \/  "_SLASH_"
+   \:  "_COLON_"
    \+  "_PLUS_"
-   \=  "_EQ_"
-   \<  "_LT_"
    \>  "_GT_"
-   \'  "_PRIME_"})
+   \<  "_LT_"
+   \=  "_EQ_"
+   \~  "_TILDE_"
+   \!  "_BANG_"
+   \@  "_CIRCA_"
+   \#  "_SHARP_"
+   \'  "_SINGLEQUOTE_"
+   \"  "_DOUBLEQUOTE_"
+   \%  "_PERCENT_"
+   \^  "_CARET_"
+   \&  "_AMPERSAND_"
+   \*  "_STAR_"
+   \|  "_BAR_"
+   \{  "_LBRACE_"
+   \}  "_RBRACE_"
+   \[  "_LBRACK_"
+   \]  "_RBRACK_"
+   \/  "_SLASH_"
+   \\  "_BSLASH_"
+   \?  "_QMARK_"})
 
 (def ^:private go-reserved-words
   #{"break" "default" "func" "interface" "select" "case" "defer" "go"
@@ -295,11 +339,22 @@
     "fallthrough" "if" "range" "type" "continue" "for" "import"
     "return" "var"})
 
+;; Munge one char to a Go-identifier-safe token using `m`, with a catch-all so
+;; nothing unmapped ever leaks through: explicit map entry wins; otherwise
+;; ASCII alphanumerics and '_' pass through; any other char becomes _U<hex>_
+;; (its Unicode code point). Mirrors glojure's codegen mungeID fallback.
+(defn- munge-char [m ch]
+  (or (get m ch)
+      (let [c (int ch)]
+        (if (or (and (>= c 97) (<= c 122))   ; a-z
+                (and (>= c 65) (<= c 90))    ; A-Z
+                (and (>= c 48) (<= c 57))    ; 0-9
+                (= c 95))                    ; _
+          (str ch)
+          (format "_U%04X_" c)))))
+
 (defn- go-name [s]
-  (let [munged (apply str
-                      (map (fn [ch]
-                             (or (get go-name-munge-map ch) ch))
-                           s))]
+  (let [munged (apply str (map (fn [ch] (munge-char go-name-munge-map ch)) s))]
     (if (contains? go-reserved-words munged)
       (str munged "_")
       munged)))
@@ -341,6 +396,55 @@
       (= op :dec)
       (= op :dot)   ; (. obj field) materialised into a local: vN := obj.field
       (contains? binary-op op)))
+
+;; A :load-var is normally re-emitted inline as ec.Deref(rt.LookupVar(...)) at
+;; each use. That is unsafe for a var the same function set!s: a root mutated
+;; between the load and a later use would make a re-emitted deref read the NEW
+;; value, diverging from the bytecode VM (which snapshots the value when the
+;; load executes). For those vars only we materialise the load into a one-time
+;; snapshot local. Restricting to set!-TARGET vars (not every load in a set!-fn)
+;; matters: materialising a load whose value is never rendered-referenced — a
+;; loop head bound to an unrelated var, say — leaves a `declared and not used`
+;; local. A var the fn set!s is, by construction, read where it matters.
+
+;; Canonical "ns/name" key for a var, from either a load-var aux symbol or the
+;; Var value held by a set!'s :const operand (which prints as "#'ns/name").
+(defn- var-key-of-symbol [aux]
+  (let [sym (symbol aux)]
+    (str (or (namespace sym) "core") "/" (name sym))))
+
+(defn- var-key-of-var-value [v]
+  (let [sym (symbol (subs (str v) 2))]
+    (str (or (namespace sym) "core") "/" (name sym))))
+
+(defn- var-key-of-ref [f ref]
+  ;; The var a set!'s operand denotes: a :load-var (aux symbol) or a Var-valued
+  ;; :const (aux is the *vm.Var). Mirrors set-var's value-expr operand handling.
+  (let [op (ir/op ref f)]
+    (cond
+      (= :load-var op) (var-key-of-symbol (ir/aux ref f))
+      (= :const op)    (let [v (ir/aux ref f)] (when (var? v) (var-key-of-var-value v)))
+      :else nil)))
+
+(defn- set-var-target-keys [f]
+  (let [cached (:set-var-keys (deref f))]
+    (if (some? cached)
+      cached
+      (let [keys (reduce
+                   (fn [acc bid]
+                     (reduce (fn [a nid]
+                               (if (= :set-var (ir/op nid f))
+                                 (let [k (var-key-of-ref f (nth (ir/refs nid f) 0))]
+                                   (if k (conj a k) a))
+                                 a))
+                             acc (ir/block-insts bid f)))
+                   #{} (ir/blocks f))]
+        (swap! f assoc :set-var-keys keys)
+        keys))))
+
+(defn- load-var-snapshot? [f nid]
+  (and (= :load-var (ir/op nid f))
+       (contains? (set-var-target-keys f) (var-key-of-symbol (ir/aux nid f)))))
 
 (defn- used? [f nid]
   (let [uses (ir/uses f)]
@@ -514,6 +618,22 @@
           ;; its params/locals never collide with the captured outer identifiers.
           (lower-template-closure-expr (:template info) capture-exprs nid))))))
 
+(defn- load-var-deref-expr [aux]
+  "The inline `ec.Deref(rt.LookupVar(ns, name))` expression for a :load-var.
+   Resolves the var against the running ExecContext so an active dynamic
+   binding (e.g. inside a future or with-scope) is honoured, and derefs to the
+   value-typed root. This is the RHS of the var's one-time snapshot local;
+   :load-var is materialised (see local-carrying-op?), not re-emitted at uses."
+  (let [sym (symbol aux)
+        sns (namespace sym)
+        sn  (name sym)]
+    (gogen/call
+      (gogen/field-sel (gogen/ident "ec") "Deref")
+      [(gogen/call
+         (gogen/field-sel (gogen/ident "rt") "LookupVar")
+         [(gogen/string-lit (if (nil? sns) "core" sns))
+          (gogen/string-lit sn)])])))
+
 (defn- value-expr [f closed-exprs nid]
   (let [op  (ir/op nid f)
         aux (ir/aux nid f)
@@ -541,29 +661,27 @@
             (gogen/ident (go-arg-name (if (function-needs-tail-call? f) "a" "arg") aux)))
 
           (= op :load-var)
-          ;; rt.LookupVar returns *vm.Var; .Deref() returns the value-typed
-          ;; root (or thread-bound) form. We need vm.Value here because the
-          ;; result may be compared (`==`) or assigned to a vm.Value local;
-          ;; *vm.Var is a concrete type and won't compare against other
-          ;; vm.Value concrete types like vm.Keyword. For :call sites
-          ;; rt.InvokeValue handles either form, so deref is safe there too.
-          (let [sym (symbol aux)
-                sns (namespace sym)
-                sn  (name sym)]
-            ;; Resolve the var against the running ExecContext so a dynamic
-            ;; binding active in the caller's context (e.g. inside a future or
-            ;; with-scope) is honoured: ec.Deref(rt.LookupVar(ns, name)).
-            (gogen/call
-              (gogen/field-sel (gogen/ident "ec") "Deref")
-              [(gogen/call
-                 (gogen/field-sel (gogen/ident "rt") "LookupVar")
-                 [(gogen/string-lit (if (nil? sns) "core" sns))
-                  (gogen/string-lit sn)])]))
+          ;; In a function with a set! the var is materialised into a one-time
+          ;; snapshot local (see fn-has-set-var?): reference the local here so a
+          ;; later set! to the same var cannot change the value this use observes
+          ;; (the snapshot `vN = ec.Deref(...)` is emitted by lower-inst-stmts via
+          ;; inst-rhs). Otherwise (no set! in the fn) re-emit the deref inline.
+          (if (load-var-snapshot? f nid)
+            (when (and (live? f nid) (infer-go-type t))
+              (value-ident f nid))
+            (load-var-deref-expr aux))
 
           (= op :const)
           (if (= "vm.Value" (go-type-spec t))
             (boxed-value-expr aux)
             (const-expr aux t))
+
+          (= op :set-var)
+          ;; (set! *v* val) evaluates to the var itself (OP_SET_VAR pushes the
+          ;; var back). The mutation is emitted as a statement by
+          ;; lower-inst-stmts; the value here is just the var operand, a
+          ;; Var-valued :const that lowers to rt.LookupVar(...).
+          (value-expr f closed-exprs (nth (ir/refs nid f) 0))
 
           (local-carrying-op? op)
           (when (and (live? f nid) (infer-go-type t))
@@ -619,6 +737,13 @@
                              (= op-str "*")  "MulValue"
                              (= op :quot)    "QuotValue"
                              (= op :div)     "DivValue"
+                             ;; = on a vm.Value operand: Clojure value-equality,
+                             ;; NOT Go ==. Go's == panics on non-comparable
+                             ;; dynamic types (vectors/maps/seqs) and compares by
+                             ;; identity, not value. rt.EqValue -> vm.ValueEquals.
+                             ;; (Concrete comparable scalars keep native == since
+                             ;; any-vm? is false and we never reach here.)
+                             (= op :eq)      "EqValue"
                              :else           nil))
             ;; Mixed operand types (only meaningful when NOT routing
             ;; through a helper, i.e. for `==`/`!=` with one vm.Value
@@ -642,8 +767,9 @@
           (let [call (gogen/call
                        (gogen/field-sel (gogen/ident "rt") vm-helper)
                        [lhs-expr rhs-expr])]
-            (if (and order-op? (= "vm.Value" result-spec))
-              ;; Inst declared type didn't narrow to bool — wrap.
+            (if (and (or order-op? (= op :eq)) (= "vm.Value" result-spec))
+              ;; Helper returns Go bool but inst declared type didn't narrow to
+              ;; bool — wrap (ordering ops and =).
               (gogen/call (gogen/field-sel (gogen/ident "vm") "Boolean") [call])
               call))
 
@@ -680,6 +806,10 @@
         (when obj-expr
           (gogen/field-sel obj-expr (go-name (name field)))))
 
+      ;; RHS of a :load-var's one-time snapshot local: ec.Deref(rt.LookupVar(...)).
+      (= op :load-var)
+      (load-var-deref-expr (ir/aux nid f))
+
       :else nil)))
 
 (declare inlined-arg?)
@@ -697,7 +827,9 @@
                              (ir/block-params bid f))
               insts  (filter (fn [nid]
                                (let [op (ir/op nid f)]
-                                 (and (local-carrying-op? op)
+                                 (and (or (local-carrying-op? op)
+                                          ;; materialised var snapshot in a set!-fn
+                                          (load-var-snapshot? f nid))
                                       (not= op :block-arg)
                                       (live? f nid)
                                       (not (closure-value? f nid))
@@ -1006,10 +1138,11 @@
               raw-cond    (value-expr f closed-exprs cond-nid)
               cond-expr   (if (= "bool" cond-spec)
                             raw-cond
-                            (when raw-cond
-                              (gogen/call
-                                (gogen/field-sel (gogen/ident "vm") "IsTruthy")
-                                [raw-cond])))
+                            (let [boxed (box-as-value f closed-exprs cond-nid)]
+                              (when boxed
+                                (gogen/call
+                                  (gogen/field-sel (gogen/ident "vm") "IsTruthy")
+                                  [boxed]))))
               true-stmts  (transfer-stmts f closed-exprs (ir/cond-target-true aux))
               false-stmts (transfer-stmts f closed-exprs (ir/cond-target-false aux))]
           (when (and cond-expr true-stmts false-stmts)
@@ -1073,12 +1206,13 @@
 (def ^:dynamic *cross-ns-vars-used* nil)
 
 (def ^:private cached-var-seg-munge-map
-  ;; Reuse go-name's char map (handles - ! ? * / + = < > '), plus '.' so dotted
-  ;; namespaces like clojure.core become Go-identifier-safe.
+  ;; Reuse go-name's full Clojure CHAR_MAP, plus '.' so dotted namespaces like
+  ;; clojure.core become Go-identifier-safe. Unmapped chars hit the same
+  ;; _U<hex>_ fallback via munge-char.
   (assoc go-name-munge-map \. "_"))
 
 (defn- cached-var-seg [s]
-  (apply str (map (fn [ch] (or (get cached-var-seg-munge-map ch) ch)) s)))
+  (apply str (map (fn [ch] (munge-char cached-var-seg-munge-map ch)) s)))
 
 (defn- cached-var-base [ns-str name-str]
   (str "__v_" (cached-var-seg ns-str) "_" (cached-var-seg name-str)))
@@ -1604,7 +1738,16 @@
         aux (ir/aux nid f)]
     (cond
       (= op :load-arg)  []
-      (= op :load-var)  []
+      ;; In a set!-containing fn a :load-var is materialised: emit the one-time
+      ;; snapshot `vN = ec.Deref(rt.LookupVar(...))` at the load point so later
+      ;; uses read the snapshot, not a value a subsequent set! may have changed.
+      ;; Without a set! the var is re-emitted inline at uses (no statement here).
+      (= op :load-var)
+      (if (and (load-var-snapshot? f nid) (live? f nid))
+        (let [rhs (inst-rhs f closed-exprs nid)]
+          (when rhs
+            [(gogen/assign "=" (value-ident f nid) rhs)]))
+        [])
       (= op :load-closed) []
       (and (= op :const) (any-fn-template? aux))
       []
@@ -1634,6 +1777,24 @@
       (call-assign-stmts f closed-exprs nid)
       (= op :try)
       (try-assign-stmts f closed-exprs nid)
+      (= op :set-var)
+      ;; Mirror OP_SET_VAR (vm.go): set the active thread binding if one is
+      ;; live, else mutate the root —
+      ;;   if !ec.SetBinding(v, val) { v.SetRoot(val) }
+      ;; v is the Var operand (refs[0], a Var-valued :const -> rt.LookupVar);
+      ;; val is boxed to vm.Value. The expression value of set! (the var) is
+      ;; produced by value-expr's :set-var branch.
+      (let [refs (ir/refs nid f)
+            varx (value-expr f closed-exprs (nth refs 0))
+            valx (box-as-value f closed-exprs (nth refs 1))]
+        (when (and varx valx)
+          [(gogen/if-stmt nil
+             (gogen/unary "!"
+               (gogen/call (gogen/field-sel (gogen/ident "ec") "SetBinding")
+                           [varx valx]))
+             [(gogen/expr-stmt
+                (gogen/call (gogen/field-sel varx "SetRoot") [valx]))]
+             nil)]))
       :else nil)))
 
 (defn- lower-block-stmts [f closed-exprs bid]
@@ -1722,6 +1883,8 @@
                              (or (= op :call)
                                  (= op :try)  ; try-assign-stmts emits rt.InvokeValueEC
                                  (= op :load-var)
+                                 ;; (var x) / set! var operand -> rt.LookupVar
+                                 (and (= op :const) (var? aux))
                                  (any-fn-template? aux)
                                  ;; Binary op with any vm.Value operand
                                  ;; lowers to rt.<Op>Value helper call.
@@ -2092,9 +2255,11 @@
           (when raw-cond
             (if (= "bool" cond-spec)
               raw-cond
-              (gogen/call
-                (gogen/field-sel (gogen/ident "vm") "IsTruthy")
-                [raw-cond]))))))))
+              (let [boxed (box-as-value f closed-exprs cond-nid)]
+                (when boxed
+                  (gogen/call
+                    (gogen/field-sel (gogen/ident "vm") "IsTruthy")
+                    [boxed]))))))))))
 
 (defn- block-inst-stmts [f closed-exprs bid]
   "Lower the instruction sequence in a block (NOT including the label or terminator).

@@ -843,12 +843,13 @@ func TestLowerGoInlinesConstantBlockParams(t *testing.T) {
 	}
 }
 
-func TestLowerGoFallsBackOnUnloweredSideEffectingCall(t *testing.T) {
+func TestLowerGoLowersVarOperandInSideEffectingCall(t *testing.T) {
 	ensureLoader()
-	// push-binding! takes a `(var *ns*)` arg that gogen cannot lower, so
-	// call-assign-stmts returns nil. A side-effecting call must NOT be silently
-	// dropped (which would change behavior and leave its arg a dead store) — the
-	// whole function must fall back to bytecode instead.
+	// A `(var *ns*)` operand now lowers to rt.LookupVar(ns,name) (RC2), so a
+	// push-binding!/pop-binding! call carrying it lowers cleanly instead of
+	// forcing whole-function fallback. The side-effecting calls must still be
+	// PRESENT in the rendered Go (never silently dropped) — that invariant is
+	// the original point of this test and is preserved by the assertions below.
 	fn := buildLispIR(t, `(defn cf [form caller-ns]
 	  (do
 	    (push-binding! (var *ns*) (first caller-ns))
@@ -856,9 +857,21 @@ func TestLowerGoFallsBackOnUnloweredSideEffectingCall(t *testing.T) {
 	      (do (pop-binding! (var *ns*)) r))))`)
 	optimizeLispIR(t, fn)
 	result := lowerGo(t, fn, ":bridge")
-	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("fallback") {
-		t.Fatalf("expected :fallback for un-lowerable side-effecting push-binding!, got %v\n%s",
-			got, bindAndRenderGoDecl(t, result))
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered now that (var *ns*) lowers, got %v reason=%v",
+			got, result.ValueAt(vm.Keyword("reason")))
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+	// The var operand renders via rt.LookupVar; both side-effecting binding
+	// calls survive (not dropped).
+	for _, want := range []string{
+		`rt.LookupVar("core", "*ns*")`,
+		`"push-binding!"`,
+		`"pop-binding!"`,
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered Go missing %q\n%s", want, rendered)
+		}
 	}
 }
 

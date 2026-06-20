@@ -1,0 +1,26 @@
+;; Regression test for the free-vars capture gap that produced
+;; "ir/build: unresolved symbol ..." fallbacks during self-AOT lowering.
+;;
+;; Root cause: ir.build/free-vars recursed into list and vector forms but NOT
+;; into map or seq literals. A closure that captured an outer local ONLY inside
+;; a map literal (e.g. (fn [] {:k x})) therefore failed to register x as free,
+;; so build never captured it and later reported x as an unresolved symbol.
+;; The fix adds (map? form) and (seq? form) branches to free-vars.
+;;
+;; RED before the fix: compile-form throws "ir/build: unresolved symbol x".
+;; GREEN after: :lowered. The trigger forms are self-contained so the test
+;; stays valid regardless of which real defns happen to hit the bucket.
+
+(ns test.gogen-freevars-capture-test
+  (:require
+   [ir.passes.pipeline :as pipeline]
+   [test :refer :all]))
+
+(defn- lower-status [form]
+  (binding [pipeline/*target* :go]
+    (:status (pipeline/compile-form form))))
+
+(deftest closure-capturing-via-map-literal-lowers
+  (testing "a var captured only inside a map literal is detected as free and lowers cleanly"
+    (is (= :lowered (lower-status '(defn cap-in-map [x] (fn [] {:result x})))))
+    (is (= :lowered (lower-status '(defn cap-in-mapval [a b] (fn [] {:k a :j b})))))))

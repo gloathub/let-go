@@ -1,0 +1,4 @@
+;; vector + map destructuring
+(let [[a b & r] [1 2 3 4 5]
+      {k :k :keys [m]} {:k 100 :m 7}]
+  (println (+ a b (count r) k m)))

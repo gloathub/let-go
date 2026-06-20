@@ -84,6 +84,10 @@
    :block-arg refs are allowed cross-context — they're the receive-side
    of a value flowing in via params, conceptually intra-block.
 
+   Cheap-load ops (:const/:load-arg/:load-var/:load-closed) are also
+   allowed to be referenced cross-block as function-scoped locals —
+   they are re-emitted at use site by the lowerer and need no threading.
+
    :invalid Insts (already-removed slots) are skipped — their refs
    are stale by design."
   (let [insts (:insts @f)]
@@ -96,7 +100,10 @@
                      def-block (nth referent 3)
                      use-block (nth ins 3)]
             :when   (and (not= def-block use-block)
-                         (not= :block-arg ref-op))]
+                         (not= :block-arg ref-op)
+                         ;; :load-var is cheap-load but mutable — a cross-block direct ref to it
+                         ;; is unsafe (must be threaded), so do NOT exempt it here (P1).
+                         (not (and (ir/op-cheap-load? ref-op) (not= ref-op :load-var))))]
       (throw (str "validate after " label
                   ": Inst #" i " (op=" op ", block=" use-block ")"
                   " has cross-block ref " r

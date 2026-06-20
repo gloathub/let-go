@@ -19,17 +19,23 @@
   "Successor block ids of bid in f, derived from its terminator.
    BranchIf: true-target first, then false. Branch: single target.
    Return/TailCall: empty."
-  (let [term (ir/block-term bid f)
-        op   (ir/op term f)
-        aux  (ir/aux term f)]
-    (cond
-      (= op :branch)
-      [(ir/branch-target-target aux)]
-      (= op :branch-if)
-      (let [t (ir/cond-target-true aux)
-            e (ir/cond-target-false aux)]
-        [(ir/branch-target-target t) (ir/branch-target-target e)])
-      :else [])))
+  (let [term (ir/block-term bid f)]
+    (if (nil? term)
+      ;; Dead/unterminated block (build can leave these; lower-body's goto
+      ;; path skips them explicitly). It reaches no exit, so it has no known
+      ;; successors. Returning [] keeps post-idoms / DFS from calling
+      ;; (ir/op nil f), which would nth a nil inst-id and crash lowering.
+      []
+      (let [op  (ir/op term f)
+            aux (ir/aux term f)]
+        (cond
+          (= op :branch)
+          [(ir/branch-target-target aux)]
+          (= op :branch-if)
+          (let [t (ir/cond-target-true aux)
+                e (ir/cond-target-false aux)]
+            [(ir/branch-target-target t) (ir/branch-target-target e)])
+          :else [])))))
 
 (defn- dfs-postorder [f entry]
   "Iterative DFS from entry, returns blocks in postorder."

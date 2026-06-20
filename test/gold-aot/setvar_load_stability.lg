@@ -1,0 +1,10 @@
+;; P1: a value loaded from a mutable Var must not be re-read after an intervening
+;; set!. x captures *x* (=1) before the branch; *x* is then mutated to 99 inside a
+;; block. The result must be the captured pre-set! value (1), not 99. Guards
+;; LoadVar being mis-treated as a re-emittable cheap-load: gogen_ir would otherwise
+;; re-emit rt.LookupVar at the use site and print 99, diverging from the bytecode VM.
+(def ^:dynamic *x* 1)
+(binding [*x* 1]
+  (let [x *x*]
+    (if true (set! *x* 99) nil)
+    (println x)))

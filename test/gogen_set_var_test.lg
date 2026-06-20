@@ -1,0 +1,37 @@
+;; Regression test for the `set!` / `:set-var` self-AOT lowering gap (RC1).
+;;
+;; Root cause: lower_go.lg had NO `:set-var` case. The op is built
+;; (build.lg build-set!) and lowered for the bytecode target (lower.lg
+;; OP_SET_VAR), but the Go path's lower-inst-stmts hit `:else nil`, so the
+;; block bailed and lower-body returned nil -> :fallback "unsupported function
+;; body shape". This is the single confirmed op-dispatch parity gap between
+;; lower.lg and lower_go.lg.
+;;
+;; The var operand of a `set!` is a :const whose aux is a live *vm.Var; the
+;; shared sub-fix (rendering a Var-valued const as rt.LookupVar(ns,name)) is
+;; what lets the operand lower at all (see gogen_binding_test for the (var x)
+;; angle).
+;;
+;; RED before the fix: :fallback. GREEN after: :lowered. Mirrors the real
+;; bucket defns test.lg :: clear-registered-tests!, register-test!, use-fixtures.
+
+(ns test.gogen-set-var-test
+  (:require
+   [ir.passes.pipeline :as pipeline]
+   [test :refer :all]))
+
+(def ^:dynamic *sv-counter* 0)
+(def ^:dynamic *sv-table* {})
+
+(defn- lower-status [form]
+  (binding [pipeline/*target* :go]
+    (:status (pipeline/compile-form form))))
+
+(deftest set-var-lowers
+  (testing "a fn whose body is (set! *var* val) lowers cleanly instead of falling back"
+    (is (= :lowered (lower-status '(defn sv-reset [] (set! *sv-table* {})))))
+    (is (= :lowered (lower-status '(defn sv-put [v]
+                                     (set! *sv-table* (assoc *sv-table* :k v))))))
+    (is (= :lowered (lower-status '(defn sv-bump []
+                                     (let [n *sv-counter*]
+                                       (set! *sv-counter* (+ n 1)))))))))

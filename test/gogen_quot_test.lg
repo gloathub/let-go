@@ -1,0 +1,28 @@
+;; Parity-coverage test for `quot` across both lowering targets.
+;;
+;; Context: lower_go's binary-op table maps :quot -> "/", but the bytecode
+;; lower-node! arithmetic case omits :quot. This test pins BOTH ends:
+;;   1. bytecode: (quot a b) evaluates correctly at runtime (the default path
+;;      this test file itself runs under), proving the bytecode pipeline
+;;      supports quot end-to-end.
+;;   2. gogen: a defn using (quot a b) lowers cleanly for the :go target.
+;; If either regresses, the two lowerers have drifted on quot.
+
+(ns test.gogen-quot-test
+  (:require
+   [ir.passes.pipeline :as pipeline]
+   [test :refer :all]))
+
+(defn- lower-status [form]
+  (binding [pipeline/*target* :go]
+    (:status (pipeline/compile-form form))))
+
+(deftest quot-evaluates-on-bytecode
+  (testing "quot computes integer division on the bytecode path"
+    (is (= 3 (quot 7 2)))
+    (is (= -3 (quot -7 2)))   ; quot truncates toward zero (not floor)
+    (is (= 0 (quot 1 2)))))
+
+(deftest quot-lowers-on-gogen
+  (testing "a defn using quot lowers cleanly for the Go target"
+    (is (= :lowered (lower-status '(defn q-half [n] (quot n 2)))))))

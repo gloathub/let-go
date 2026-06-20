@@ -1,0 +1,8 @@
+;; Drives the IR pipeline at runtime. Under -tags gogen_ir the pipeline runs
+;; as NATIVE lowered Go, so this exercises the self-AOT lowering path (the one
+;; the pkg/ir tests hit). Expected to diverge until R1 (the @f deref rot) lands.
+(require 'ir.passes.pipeline)
+(set! *ir-compile* true)
+(defn callee [x] (+ x 1))
+(defn caller [y] (callee (callee y)))
+(println (caller 10))

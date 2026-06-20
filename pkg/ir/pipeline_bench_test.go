@@ -307,10 +307,7 @@ func BenchmarkExecOnly(b *testing.B) {
 // says sign / xsofy-sign "remain pre-existing failures unrelated to this
 // change." Integrating d26edaf4 is the natural follow-up to remove this
 // skip.
-var pendingPhase5 = map[string]string{
-	"sign":       "needs commit d26edaf4 (thread outer locals through if-join) to fix Phase B interaction",
-	"xsofy-sign": "needs commit d26edaf4 (thread outer locals through if-join) to fix Phase B interaction",
-}
+var pendingPhase5 = map[string]string{}
 
 func TestPipelineRoundTrip_ProducesExecutableChunks(t *testing.T) {
 	ensureLoader()

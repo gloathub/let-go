@@ -52,6 +52,7 @@
 (require 'ir.passes.dce)
 (require 'ir.passes.licm)
 (require 'ir.passes.typeinfer)
+(require 'ir.lattice)
 (require 'ir.build)
 (require 'ir.lower-go)
 
@@ -66,28 +67,49 @@
 
 ;; os/args is [binary script user-arg user-arg...]
 (def user-args (vec (drop 2 (seq os/args))))
-(when (< (count user-args) 3)
+(when (< (count user-args) 1)
+  (usage-and-exit "expected at least 1 arg (mode)"))
+
+;; `corpus [<edn>]` mode: read the committed allow-list and lower-go its
+;; :stress set (minus :exclude). Default path scripts/ir-stress-corpus.edn.
+;; This is the canonical "stress everything we ship + test" entry point.
+(def corpus-mode? (= (nth user-args 0) "corpus"))
+(def corpus-edn
+  (when corpus-mode?
+    (let [path (if (> (count user-args) 1)
+                 (nth user-args 1)
+                 "scripts/ir-stress-corpus.edn")]
+      ;; The EDN is map-first (no leading comments) so plain read-string works;
+      ;; let-go read-string returns VOID if a file leads with a ';;' comment.
+      (read-string (slurp path)))))
+
+(when (and (not corpus-mode?) (< (count user-args) 3))
   (usage-and-exit "expected at least 3 args (mode + per-mode args)"))
 
 (def measurement-mode
-  (let [m (nth user-args 0)]
-    (cond
-      (= m "lower-go")   :lower-go
-      (= m "ir-compile") :ir-compile
-      (= m "trace")      :trace
-      :else (usage-and-exit (str "<mode> must be 'ir-compile', 'lower-go', or 'trace', got: " m)))))
-(def raw-dir (nth user-args 1))
+  (if corpus-mode?
+    :lower-go
+    (let [m (nth user-args 0)]
+      (cond
+        (= m "lower-go")   :lower-go
+        (= m "ir-compile") :ir-compile
+        (= m "trace")      :trace
+        :else (usage-and-exit (str "<mode> must be 'corpus', 'ir-compile', 'lower-go', or 'trace', got: " m))))))
+(def raw-dir (if corpus-mode? "." (nth user-args 1)))
 (def corpus-dir
   (let [n (count raw-dir)]
     (if (and (pos? n) (= \/ (nth raw-dir (dec n))))
       raw-dir
       (str raw-dir "/"))))
 ;; trace mode: args are <dir> <file> <defn-name>. ir-compile/lower-go: args
-;; are <dir> <file>....
+;; are <dir> <file>.... corpus mode: files come from the EDN :stress set.
 (def files
-  (if (= measurement-mode :trace)
-    [(nth user-args 2)]
-    (vec (drop 2 user-args))))
+  (cond
+    corpus-mode?
+    (let [excluded (set (keys (:exclude corpus-edn)))]
+      (vec (remove excluded (:stress corpus-edn))))
+    (= measurement-mode :trace) [(nth user-args 2)]
+    :else (vec (drop 2 user-args))))
 (def trace-defn-name
   (when (= measurement-mode :trace)
     (when (< (count user-args) 4)
@@ -106,6 +128,47 @@
   (when (and ns-form- (seq? ns-form-) (> (count ns-form-) 1))
     (nth ns-form- 1)))
 
+(defn own-def-names [parsed]
+  "Every top-level name this file defines: the 2nd element of any form whose
+   head is a def-like special/macro (def, defn, defn-, defmacro, defonce,
+   def-, deftype, defprotocol). Used to pre-declare a file's own vars so the
+   per-defn AOT build resolves self/sibling references — exactly the state a
+   loaded namespace is in during production lowering.
+
+   The name slot may be meta-wrapped: `(def ^:private x v)` reads as
+   `(def (with-meta x {:private true}) v)`, so unwrap (with-meta sym ...) to
+   the bare symbol — otherwise ^:private / ^:dynamic siblings stay unresolved."
+  (when (and parsed (seq? parsed))
+    (->> (rest parsed)
+         (keep (fn [f]
+                 (when (and (seq? f) (>= (count f) 2))
+                   (let [h (first f)]
+                     (when (and (symbol? h)
+                                (clojure.string/starts-with? (str h) "def"))
+                       (let [raw (nth f 1)
+                             nm  (if (and (seq? raw) (= (first raw) 'with-meta))
+                                   (second raw)
+                                   raw)]
+                         (when (symbol? nm) nm)))))))
+         (vec))))
+
+(defn declare-own-defns! [parsed]
+  "Intern a stub var for each name this file defines that does not already
+   resolve in the current ns, so forward/mutual/self references resolve at
+   build time without evaluating bodies. Mirrors production, where the
+   namespace is fully loaded (all vars interned) before lowering.
+
+   Only names that DON'T already resolve are stubbed: declare expands to
+   (def name nil), which would clobber an already-bound var (e.g. niling out
+   map/filter when a loaded core file is in the corpus). Gating on resolve
+   keeps loaded functions intact and only fills in the genuinely-missing
+   sibling names."
+  (let [missing (->> (own-def-names parsed)
+                     (remove (fn [nm] (some? (resolve nm))))
+                     (vec))]
+    (when (seq missing)
+      (try (eval (cons 'declare missing)) (catch e nil)))))
+
 (defn require-deps! [ns-form-]
   "Given an (ns name (:require ...)) form, require each dependency
    with aliases set up."
@@ -116,10 +179,10 @@
           (try
             (cond
               (symbol? spec)
-                (require spec)
+              (require spec)
               (vector? spec)
-                ;; Pass the full vector so :as aliases are registered
-                (require spec)
+              ;; Pass the full vector so :as aliases are registered
+              (require spec)
               :else nil)
             (catch e nil)))))))
 
@@ -171,15 +234,15 @@
 
       ;; Genuinely-unresolved symbol: bucket by the symbol name.
       (re-find #"unresolved symbol" m)
-        (let [match (re-find #"unresolved symbol ([^\s,)]+)" m)]
-          (if match
-            (keyword "unresolved" (second match))
-            :unresolved-symbol))
+      (let [match (re-find #"unresolved symbol ([^\s,)]+)" m)]
+        (if match
+          (keyword "unresolved" (second match))
+          :unresolved-symbol))
       (re-find #"Can't resolve" m)
-        (let [match (re-find #"Can't resolve ([^\s,)]+)" m)]
-          (if match
-            (keyword "unresolved" (second match))
-            :unresolved-symbol))
+      (let [match (re-find #"Can't resolve ([^\s,)]+)" m)]
+        (if match
+          (keyword "unresolved" (second match))
+          :unresolved-symbol))
 
       ;; Destructuring issues
       (re-find #"destructur" m)  :destructure-rejection
@@ -234,8 +297,8 @@
    top-K summary can name the offender."
   (when (seq trace)
     (let [worst (reduce (fn [a b] (if (> (:ms b) (:ms a)) b a))
-                       (first trace)
-                       (rest trace))]
+                  (first trace)
+                  (rest trace))]
       (swap! autotrace-rows conj
              {:defn defn-name :worst-pass (:pass worst) :worst-ms (:ms worst)
               :total-ms (reduce + (map :ms trace))}))
@@ -258,11 +321,11 @@
     (loop []
       (cond
         (realized? f)
-          (try (deref f) (catch e e))
+        (try (deref f) (catch e e))
         (> (System/nanoTime) deadline-ns)
-          :stress/timeout
+        :stress/timeout
         :else
-          (do (sleep 10) (recur))))))
+        (do (sleep 10) (recur))))))
 
 (defn try-lower-go [form]
   "Run form through the AOT path: build IR + lower to Go (bridge mode).
@@ -274,18 +337,18 @@
         (cond
           ;; Single-arity success
           (and (map? result) (= :lowered (:status result)))
-            :ok
+          :ok
           ;; Single-arity fallback — route reason through classify-error so
           ;; gogen/lower-go fallback reasons land in the same structural
           ;; buckets as build-side throws (e.g. :gogen/bad-identifier rather
           ;; than a long unique 'fallback | ...' string per defn).
           (and (map? result) (= :fallback (:status result)))
-            (classify-error (or (:reason result) "no-reason"))
+          (classify-error (or (:reason result) "no-reason"))
           ;; Multi-arity template: succeed if every arity lowered
           (and (map? result) (= :multi-fn-template (:kind result)))
-            (if (every? (fn [e] (some? (:fn e))) (:fns result))
-              :ok
-              :multi-arity-partial-fallback)
+          (if (every? (fn [e] (some? (:fn e))) (:fns result))
+            :ok
+            :multi-arity-partial-fallback)
           :else :ok)))
     (catch e (classify-error e))))
 
@@ -337,7 +400,7 @@
                                                            :before b :after a
                                                            :delta (- b a) :ms ms})))]
                          (let [ti1 (atom {})]
-                           (binding [ir.passes.typeinfer/*ti-counters* ti1]
+                           (binding [ir.lattice/*ti-counters* ti1]
                              (run-pass! "typeinfer-pre" -1 #(ir.passes.typeinfer/typeinfer ir-fn)))
                            (let [s @ti1]
                              (println (format "      typeinfer: %d analyze-block, %d type-join, %d normalize"
@@ -365,7 +428,7 @@
                                  (>= iter 15)     (println "    !! 16-iter cap hit")
                                  :else            (recur (inc iter))))))
                          (let [ti2 (atom {})]
-                           (binding [ir.passes.typeinfer/*ti-counters* ti2]
+                           (binding [ir.lattice/*ti-counters* ti2]
                              (run-pass! "typeinfer-post" -1 #(ir.passes.typeinfer/typeinfer ir-fn)))
                            (let [s @ti2]
                              (println (format "      typeinfer: %d analyze-block, %d type-join, %d normalize"
@@ -445,9 +508,9 @@
         (when (map? tr)
           (accumulate-pass-trace! (nth form 1) (:pass-trace tr))
           (println (format "  [autotrace] %s: expand=%.0f build=%.0f optimize=%.0f lower=%.0f ms"
-                          (str (nth form 1))
-                          (:expand-ms tr) (:build-ms tr)
-                          (:optimize-ms tr) (:lower-ms tr))))))
+                     (str (nth form 1))
+                     (:expand-ms tr) (:build-ms tr)
+                     (:optimize-ms tr) (:lower-ms tr))))))
     [result ms]))
 
 (defn stats-for [times]
@@ -477,6 +540,7 @@
             (eval (list 'in-ns (list 'quote ns-sym)))
             (catch e nil)))
         (require-deps! ns-form-)
+        (declare-own-defns! parsed)
         (let [results (mapv (fn [d]
                               (let [name (nth d 1)
                                     [r ms] (try-ir-timed d)]
@@ -535,7 +599,8 @@
               ns-sym (ns-name-from ns-form-)]
           (when ns-sym
             (eval (list 'in-ns (list 'quote ns-sym))))
-          (require-deps! ns-form-))
+          (require-deps! ns-form-)
+          (declare-own-defns! parsed))
         (catch e nil)))  ;; Silently skip load errors; we'll catch them per-fixture
     (let [t1 (System/nanoTime)
           ms (double (/ (- t1 t0) 1000000.0))]
@@ -569,9 +634,9 @@
             oks     (reduce + 0 (map (fn [r] (or (:ok r) 0)) all-results))
             all-times (mapcat (fn [r] (or (:times r) [])) all-results)
             all-errs (reduce (fn [acc r]
-                              (merge-with + acc (or (:error-buckets r) {})))
-                            {}
-                            all-results)]
+                               (merge-with + acc (or (:error-buckets r) {})))
+                       {}
+                       all-results)]
 
         ;; Per-file summary
         (println "=== Per-file results (cold pass) ===")
@@ -591,9 +656,9 @@
               warm-stats (stats-for (mapcat (fn [r] (or (:times r) [])) results2))]
           (println (str "\n=== Timing Statistics ==="))
           (println (format "Cold pass (first run):  mean=%.2f ms  median=%.2f ms  p95=%.2f ms"
-                          (:mean cold-stats) (:median cold-stats) (:p95 cold-stats)))
+                     (:mean cold-stats) (:median cold-stats) (:p95 cold-stats)))
           (println (format "Warm pass (second run): mean=%.2f ms  median=%.2f ms  p95=%.2f ms"
-                          (:mean warm-stats) (:median warm-stats) (:p95 warm-stats))))
+                     (:mean warm-stats) (:median warm-stats) (:p95 warm-stats))))
 
         ;; Error buckets
         (println (str "\n=== Failure Buckets ==="))
@@ -609,8 +674,8 @@
           (println "\n=== Worst-pass per traced defn ===")
           (doseq [r (reverse (sort-by :worst-ms @autotrace-rows))]
             (println (format "  %-35s worst=%-15s %6.1f ms  total=%6.1f ms"
-                            (str (:defn r)) (str (:worst-pass r))
-                            (:worst-ms r) (:total-ms r)))))
+                       (str (:defn r)) (str (:worst-pass r))
+                       (:worst-ms r) (:total-ms r)))))
 
         ;; Per-defn analysis log
         (when log-path

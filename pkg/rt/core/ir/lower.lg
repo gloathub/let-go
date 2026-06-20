@@ -72,6 +72,11 @@
            :stack-sp  0
            :use-count use-count
            :value-stack-pos {}
+           ;; Tracks which block recorded each entry in value-stack-pos.
+           ;; value-pos-of returns nil when the recorded block differs from
+           ;; current-block, causing materialize! to fall through to the
+           ;; cheap-reemit path for function-scoped locals.
+           :value-stack-block {}
            :uses      uses
            ;; Per-block runtime "junk-below": values still on the runtime
            ;; stack beneath this block's params at block entry. Populated
@@ -87,7 +92,13 @@
 (defn- block-ip [l bid]   (nth (:block-ips @l) bid))
 (defn- stack-sp [l]       (:stack-sp @l))
 (defn- use-count-of [l nid] (or (get (:use-count @l) nid) 0))
-(defn- value-pos-of [l nid] (get (:value-stack-pos @l) nid))
+(defn- value-pos-of [l nid]
+  "Return the stack position for nid only when it was recorded in the
+   current block. Cross-block positions are stale — the lowerer falls
+   through to cheap re-emit for function-scoped locals."
+  (when-let [pos (get (:value-stack-pos @l) nid)]
+    (when (= (get (:value-stack-block @l) nid) (:current-block @l))
+      pos)))
 
 (defn- set-block-ip! [l bid ip]
   (swap! l update :block-ips (fn [v] (assoc v bid ip))))
@@ -99,7 +110,10 @@
   (swap! l update :stack-sp + delta))
 
 (defn- set-value-pos! [l nid pos]
-  (swap! l update :value-stack-pos assoc nid pos))
+  (swap! l (fn [s]
+             (-> s
+                 (update :value-stack-pos assoc nid pos)
+                 (update :value-stack-block assoc nid (:current-block s))))))
 
 (defn- decrement-use! [l nid]
   "Decrement the use-count for nid; safe to call when nid isn't in
@@ -172,25 +186,29 @@
       :else false)))
 
 (defn- check-cross-block! [f uses]
-  "Walk uses; reject any cross-block direct-Refs use (only branch-arg
-   uses may cross). Throws on violation, matching Go's error message.
+  "Walk uses; reject any cross-block direct-Refs use unless the def is a
+   cheap-load op (function-scoped local) or a branch-target arg use.
+   Cheap-load ops (:const/:load-arg/:load-var/:load-closed) are re-emitted
+   at use site by materialize! and do not need block-arg threading.
    uses[i] is a bitset of user-ids — iterate via ir/uses-for-each, not
    raw seq ops (which would treat int64 words as ids)."
   (loop [i 0]
     (when (< i (count uses))
       (let [us (nth uses i)]
         (when-not (ir/uses-empty? us)
-          (let [def-block (ir/block-of i f)]
-            (ir/uses-for-each us
-              (fn [user-id]
-                (let [user-block (ir/block-of user-id f)]
-                  (when (and (not= user-block def-block)
-                             (not (is-terminator-branch-arg-use? user-id i f)))
-                    (throw (str "ir/lower: cross-block use of value %"
-                                i " via direct Refs (defined in block "
-                                def-block ", used in block " user-block
-                                ") — only branch-target args may cross blocks; "
-                                "see follow-up issue D")))))))))
+          (let [def-block (ir/block-of i f)
+                def-op    (ir/op i f)]
+            (when-not (and (ir/op-cheap-load? def-op) (not= def-op :load-var))
+              (ir/uses-for-each us
+                (fn [user-id]
+                  (let [user-block (ir/block-of user-id f)]
+                    (when (and (not= user-block def-block)
+                               (not (is-terminator-branch-arg-use? user-id i f)))
+                      (throw (str "ir/lower: cross-block use of value %"
+                                  i " via direct Refs (defined in block "
+                                  def-block ", used in block " user-block
+                                  ") — only branch-target args may cross blocks; "
+                                  "see follow-up issue D"))))))))))
       (recur (inc i)))))
 
 ;; --- heuristics ------------------------------------------------------
@@ -334,7 +352,7 @@
         (bump-stack-sp! l 1)
         (bump-max-stack! l))
 
-      (:add :sub :mul :lt :lte :gt :gte :eq)
+      (:add :sub :mul :quot :lt :lte :gt :gte :eq)
       (do (emit! l nid op)
           (bump-stack-sp! l -1))  ; 2→1
 
@@ -548,16 +566,17 @@
    exactly one use (use-count==1) and that user is the branch-if
    terminator itself. build-if always produces such conds; only
    hand-built IR could violate this."
-  (when cond-ref
-    (and (= 1 (use-count-of l cond-ref))
-         ;; use-count==1 → bitset has exactly one user-id; read via
-         ;; ir/uses-first (bitsets are vec-of-int64-words, so raw
-         ;; `first`/`count` would return a word and the word-count).
-         (let [uses (:uses @l)
-               us   (when (< cond-ref (count uses)) (nth uses cond-ref))]
-           (and us
-                (not (ir/uses-empty? us))
-                (= term (ir/uses-first us)))))))
+  ;; cond-ref is typed as native int (InstId) by gogen; :branch-if
+  ;; always has exactly one ref so cond-ref is never nil here.
+  (and (= 1 (use-count-of l cond-ref))
+       ;; use-count==1 → bitset has exactly one user-id; read via
+       ;; ir/uses-first (bitsets are vec-of-int64-words, so raw
+       ;; `first`/`count` would return a word and the word-count).
+       (let [uses (:uses @l)
+             us   (when (< cond-ref (count uses)) (nth uses cond-ref))]
+         (and us
+              (not (ir/uses-empty? us))
+              (= term (ir/uses-first us))))))
 
 (defn- lower-block! [l bid]
   (swap! l assoc :current-block bid)
@@ -595,7 +614,10 @@
           ;; Deferred cond (emitted after branch-target args).
           (and deferred-cond (= nid deferred-cond)) nil
           ;; Cheap-load deferral: skip body emission when not body-emit-cheap.
+          ;; :load-var excluded — mutable var root must be materialized once, not
+          ;; re-emitted (a re-emitted rt.LookupVar would read a post-set! value, P1).
           (and (ir/op-cheap-load? op)
+               (not= op :load-var)
                (not (should-body-emit-cheap? l nid)))
           nil
           :else (emit-inst! l nid))))

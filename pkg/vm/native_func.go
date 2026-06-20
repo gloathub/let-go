@@ -57,7 +57,19 @@ func (t *theNativeFnType) Box(fn any) (Value, error) {
 					rawArgs[i] = rawArgs[i].Convert(in)
 				}
 			} else {
-				rawArgs[i] = reflect.Zero(in)
+				// NIL to an interface param: pass vm.NIL (falsy) instead of a
+				// nil interface (which IsTruthy treats as truthy, breaking
+				// (or nil []) patterns) — but ONLY when *vm.Nil actually
+				// satisfies the param interface (vm.Value or a super-interface).
+				// For unrelated interfaces (error, io.Reader, …) *vm.Nil is not
+				// assignable, so a genuine nil interface (reflect.Zero) is
+				// required or reflect.Call panics ("using *vm.Nil as type error").
+				nilVal := reflect.ValueOf(NIL)
+				if in.Kind() == reflect.Interface && nilVal.Type().AssignableTo(in) {
+					rawArgs[i] = nilVal
+				} else {
+					rawArgs[i] = reflect.Zero(in)
+				}
 			}
 		}
 		res := v.Call(rawArgs)

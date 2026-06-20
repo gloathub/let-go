@@ -1718,17 +1718,26 @@
         :bind  (let [sym   (step 1)
                      coll  (step 2)
                      itersym (gensym "for__iter")
-                     atomsym (gensym "for__a")]
+                     atomsym (gensym "for__a")
+                     ;; ssym/xssym MUST be gensym'd, not fixed 'for__s/'for__xs.
+                     ;; A nested `for` nests these fns, so a fixed inner for__s
+                     ;; shadows the outer's. The interpreter handles that by
+                     ;; lexical scope, but the gogen out-of-SSA coalescing keys
+                     ;; on SOURCE names and conflates the two distinct for__s
+                     ;; bindings — the inner loop then reads the OUTER cursor and
+                     ;; recurses forever (stack overflow under -tags gogen_ir).
+                     ssym    (gensym "for__s")
+                     xssym   (gensym "for__xs")]
                  ;; Use atom for self-reference since named fn doesn't work
                  (list 'let [atomsym (list 'atom nil)
                              '_      (list 'reset! atomsym
-                                           (list 'fn ['for__s]
+                                           (list 'fn [ssym]
                                                  (list 'lazy-seq
-                                                       (list 'when-let ['for__xs (list 'seq 'for__s)]
-                                                             (list 'let [sym (list 'first 'for__xs)]
+                                                       (list 'when-let [xssym (list 'seq ssym)]
+                                                             (list 'let [sym (list 'first xssym)]
                                                                    (list 'concat-list
                                                                          inner
-                                                                         (list (list 'deref atomsym) (list 'rest 'for__xs))))))))
+                                                                         (list (list 'deref atomsym) (list 'rest xssym))))))))
                              itersym (list 'deref atomsym)]
                        (list itersym coll)))))))
 

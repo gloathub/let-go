@@ -1,0 +1,50 @@
+;; Regression test for :gogen/nth-non-int self-AOT lowering gap.
+;;
+;; Root cause: ir.structurize/post-idoms walks EVERY block via (range n) and
+;; calls ir.dominance/successors on each — including dead/unterminated blocks
+;; that build can leave behind (the goto-fallback path in lower_go skips these,
+;; but the structurize path did not). For such a block the terminator is nil,
+;; so successors evaluated (ir/op nil f) -> (nth insts nil), and the Go nth
+;; builtin raised "nth index must be an integer", which lower caught and
+;; returned as a :fallback. The fix guards successors to return [] for a nil
+;; terminator.
+;;
+;; This test carries its own trigger form (a faithful transcription of
+;; ir/dominance.lg's dfs-postorder, one of the 13 defns that hit this bucket)
+;; so it stays valid even if the real source moves. RED before the fix
+;; (compile-form returns :fallback with reason "nth index must be an integer");
+;; GREEN after (:lowered).
+
+(ns test.gogen-nth-non-int-test
+  (:require
+   [ir.dominance]
+   [ir.passes.pipeline :as pipeline]
+   [test :refer :all]))
+
+(def ^:private dead-block-trigger
+  '(defn- dfs-postorder [f entry]
+     (loop [stack [[entry (ir.dominance/successors f entry) 0]]
+            visited #{entry}
+            post []]
+       (if (empty? stack)
+         post
+         (let [top (peek stack)
+               bid (nth top 0)
+               succs (nth top 1)
+               si (nth top 2)]
+           (if (< si (count succs))
+             (let [s (nth succs si)
+                   stack' (assoc stack (dec (count stack)) [bid succs (inc si)])]
+               (if (contains? visited s)
+                 (recur stack' visited post)
+                 (recur (conj stack' [s (ir.dominance/successors f s) 0])
+                        (conj visited s) post)))
+             (recur (pop stack) visited (conj post bid))))))))
+
+(deftest dead-block-lowers-without-nth-non-int
+  (testing "lowering a defn whose CFG has a dead/unterminated block lowers cleanly instead of crashing successors on a nil terminator"
+    (binding [pipeline/*target* :go]
+      (let [r (pipeline/compile-form dead-block-trigger)]
+        (is (= :lowered (:status r))
+            (str "expected :lowered, got " (:status r)
+                 " reason=" (:reason r)))))))

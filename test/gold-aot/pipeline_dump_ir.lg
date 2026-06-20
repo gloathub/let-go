@@ -1,0 +1,9 @@
+;; Exercises the self-AOT lowering pipeline at runtime: build an IR fn and
+;; pretty-print it via ir.dump/dump. Under -tags gogen_ir the dump runs as
+;; native lowered Go and hits the @f deref/push-binding rot (R1), so it diverges
+;; from bytecode. Allowlisted in test/gogen_aot_xfail.txt until R1 lands; when
+;; R1 fixes the rot this fixture will AGREE and the ratchet forces its removal.
+(require 'ir.build)
+(require 'ir.dump)
+(def f (ir.build/build-fn '(defn foo [x] (+ x 1))))
+(println (subs (ir.dump/dump f) 0 10))

@@ -131,6 +131,35 @@
       (apply list h (concat (if named (list named) (list))
                             (map (fn [c] (rw (first c) (next c))) rest1))))))
 
+(def ^:private *deftype-method-ir-cache*
+  ;; Per-compile cache [tname mname arity] -> built+optimized IR fn, so a deftype
+  ;; method isn't run through the full optimize-fn pipeline twice (once for
+  ;; protocol-method-sigs/:needs-error?, once for lowering). Reset at the start of
+  ;; the orchestration let below.
+  (atom {}))
+
+(defn- build-method-ir-fn
+  "Build + optimize the IR fn for one deftype protocol-method impl form
+   (mname [this & args] body...): bare field refs become (. this field), the body
+   is built+optimized, and the receiver arg is seeded as [:dtype tname]. Cached
+   per compile so :needs-error? analysis and lowering share a single build."
+  [tname fieldset mform]
+  (let [ckey [tname (first mform) (count (second mform))]]
+    (or (get @*deftype-method-ir-cache* ckey)
+        (let [params    (second mform)
+              this-sym  (first params)
+              body      (drop 2 mform)
+              ;; Method params (receiver + args) shadow field names: seed the
+              ;; bound set with all of them so a param like `side` on a type with
+              ;; a `side` field stays the param, not (. this side).
+              bound0    (set (dt-collect-syms params))
+              rewritten (map (fn [b] (dt-rewrite-field fieldset this-sym bound0 b)) body)
+              defn-form (apply list 'defn (first mform) params (map expand-all rewritten))
+              ir-fn     (-> defn-form ir.build/build-fn optimize-fn)]
+          (swap! ir-fn assoc :arg-types [[:dtype tname]])
+          (swap! *deftype-method-ir-cache* assoc ckey ir-fn)
+          ir-fn))))
+
 (defn- protocol-method-sigs
   "Join across all impls of every protocol method to a unified signature map
    keyed by exported Go method name: {go-name {:needs-error? bool}}.
@@ -144,19 +173,11 @@
             fieldset (set (:fields dt))]
         (reduce
           (fn [m mform]
-            (let [mname     (first mform)
-                  params    (second mform)
-                  this-sym  (first params)
-                  body      (drop 2 mform)
-                  bound0    (set (dt-collect-syms params))
-                  rewritten (map (fn [b] (dt-rewrite-field fieldset this-sym bound0 b)) body)
-                  defn-form (apply list 'defn mname params (map expand-all rewritten))
-                  ir-fn     (-> defn-form ir.build/build-fn optimize-fn)
-                  _         (swap! ir-fn assoc :arg-types [[:dtype tname]])
-                  ne?       (binding [lower-go/*force-needs-error* nil]
-                              (lower-go/function-needs-error? ir-fn))
-                  gname     (lower-go/go-export-name mname)
-                  prev      (get m gname)]
+            (let [ir-fn (build-method-ir-fn tname fieldset mform)
+                  ne?   (binding [lower-go/*force-needs-error* nil]
+                          (lower-go/function-needs-error? ir-fn))
+                  gname (lower-go/go-export-name (first mform))
+                  prev  (get m gname)]
               (assoc m gname {:needs-error? (or (:needs-error? prev) ne?)})))
           acc
           (filter (fn [x] (and (seq? x) (symbol? (first x)) (vector? (second x))))
@@ -179,21 +200,9 @@
                             (:impls decl))
         decls       (mapv
                       (fn [m]
-                        (let [mname     (first m)
-                              params    (second m)
-                              this-sym  (first params)
-                              body      (drop 2 m)
-                              ;; The method params (receiver + args) shadow
-                              ;; field names: seed the bound set with all of
-                              ;; them so a param like `side` on a type with a
-                              ;; `side` field stays the param, not (. this side).
-                              bound0    (set (dt-collect-syms params))
-                              rewritten (map (fn [b] (dt-rewrite-field fieldset this-sym bound0 b)) body)
-                              defn-form (apply list 'defn mname params (map expand-all rewritten))
-                              ir-fn     (-> defn-form ir.build/build-fn optimize-fn)
-                              _         (swap! ir-fn assoc :arg-types [[:dtype tname]])
-                              result    (lower-go/lower-method ir-fn recv-type
-                                          (lower-go/go-export-name mname))]
+                        (let [ir-fn  (build-method-ir-fn tname fieldset m)
+                              result (lower-go/lower-method ir-fn recv-type
+                                       (lower-go/go-export-name (first m)))]
                           (:decl result)))
                       methods)]
     {:status :lowered :decls decls}))
@@ -610,7 +619,8 @@
         ctor-types  (into {} (map (fn [dt] [(str "->" (:name dt)) (:name dt)]) deftypes))
         ctors       (into {} (map (fn [dt] [(str "->" (:name dt)) (lower-go/go-export-name (:name dt))]) deftypes))
         vm-import   {:path "github.com/nooga/let-go/pkg/vm" :alias "vm"}
-        rt-import   {:path "github.com/nooga/let-go/pkg/rt" :alias "rt"}]
+        rt-import   {:path "github.com/nooga/let-go/pkg/rt" :alias "rt"}
+        _cache-rst  (reset! *deftype-method-ir-cache* {})]
     (binding [*ns* (the-ns ns-name)
               ir.passes.typeinfer/*typeinfer-budget-ms* nil
               ir.passes.typeinfer/*deftype-ctor-types* (when (seq ctor-types) ctor-types)

@@ -417,9 +417,14 @@
                 (> (- (System/nanoTime) start-ns) budget-ns)))]
      (loop [queue queue0
             queued queued0
-            s state]
+            s state
+            tick 0]
        (cond
-         (budget-exceeded?)
+         ;; Check the wall-clock budget only every 128 drains — calling
+         ;; System/nanoTime each iteration is needless overhead; the lattice is
+         ;; monotone so a slightly late bail is harmless (restores the pre-#235
+         ;; 128:1 throttle).
+         (and (zero? (rem tick 128)) (budget-exceeded?))
          (do
            (println "typeinfer: hit *typeinfer-budget-ms*"
                     (or *typeinfer-budget-ms* "<nil>")
@@ -439,8 +444,13 @@
                     (int (/ (- (System/nanoTime) start-ns) 1000000))))
            s)
          :else
-         (let [entry (first queue)
-               queue' (subvec queue 1)
+         ;; Drain LIFO via peek/pop (O(1) on a vector). The previous
+         ;; (first queue)+(subvec queue 1) FIFO was O(N) per pop — let-go's
+         ;; subvec is a full make+copy, not a view — making the drain O(N^2)
+         ;; per pass. The lattice converges order-independently, so LIFO is
+         ;; equivalent and far cheaper (typeinfer runs twice per optimize-fn).
+         (let [entry (peek queue)
+               queue' (pop queue)
                queued' (disj queued entry)]
            (case (first entry)
              :param
@@ -450,13 +460,13 @@
                    [s' changed?] (join-state-type s param-id param-type)]
                (if changed?
                  (let [[q2 qq2] (propagate-changed! param-id deps queue' queued')]
-                   (recur q2 qq2 s'))
-                 (recur queue' queued' s)))
+                   (recur q2 qq2 s' (inc tick)))
+                 (recur queue' queued' s (inc tick))))
              :inst
              (let [nid (second entry)
                    [s' changed?] (join-state-type s nid (infer-one nid f s))]
                (if changed?
                  (let [[q2 qq2] (propagate-changed! nid deps queue' queued')]
-                   (recur q2 qq2 s'))
-                 (recur queue' queued' s)))
-             (recur queue' queued' s))))))))
+                   (recur q2 qq2 s' (inc tick)))
+                 (recur queue' queued' s (inc tick))))
+             (recur queue' queued' s (inc tick)))))))))

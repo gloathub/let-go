@@ -1,0 +1,4 @@
+;; binding conveyed through a plain fn call, restored after
+(def ^:dynamic *x* 10)
+(defn g [] *x*)
+(println [(g) (binding [*x* 42] (g)) (g)])

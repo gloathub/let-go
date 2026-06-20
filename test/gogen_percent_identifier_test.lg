@@ -1,0 +1,27 @@
+;; Regression test for the :gogen/bad-identifier self-AOT lowering gap.
+;;
+;; Root cause: the anonymous-fn reader shorthand #(...) names its implicit
+;; parameters %1/%2/... When such a parameter is used more than once, build
+;; emits a Go var-decl bound to that name, and gogen's identifier generation
+;; (ir.lower_go go-name-munge) had no mapping for '%', so it tried to emit the
+;; literal "%1" as a Go identifier and threw "%1 is not a valid identifier".
+;; (A parameter used only once gets inlined, which is why single-use #() lowers
+;; fine — the bug needs a repeated %.) The fix adds \% -> "_PERCENT_" to
+;; go-name-munge-map.
+;;
+;; RED before the fix: compile-form returns :fallback with reason
+;; "...%1 is not a valid identifier". GREEN after: :lowered.
+
+(ns test.gogen-percent-identifier-test
+  (:require
+   [ir.passes.pipeline :as pipeline]
+   [test :refer :all]))
+
+(defn- lower-status [form]
+  (binding [pipeline/*target* :go]
+    (:status (pipeline/compile-form form))))
+
+(deftest anon-fn-percent-param-reused-lowers
+  (testing "an #() anonymous-fn parameter used more than once munges to a valid Go identifier and lowers cleanly"
+    (is (= :lowered (lower-status '(defn pct-twice [xs avoid] (remove #(or (= % avoid) (nil? %)) xs)))))
+    (is (= :lowered (lower-status '(defn pct-nest [xs] (filter #(or (= % 1) (even? %)) xs)))))))

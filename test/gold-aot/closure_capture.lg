@@ -1,0 +1,7 @@
+;; closure capturing a mutable cell across calls
+(defn make-counter []
+  (let [c (atom 0)]
+    (fn [] (swap! c inc) @c)))
+(def nx (make-counter))
+(nx) (nx)
+(println (nx))
