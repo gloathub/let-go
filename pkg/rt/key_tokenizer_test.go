@@ -58,10 +58,10 @@ func TestNextKeyEmpty(t *testing.T) {
 	}
 }
 
-func TestIncompleteToken(t *testing.T) {
-	// incompleteToken checks the FRONT token (the one ReadKey emits next), so
-	// only a buffer whose leading token is split counts as incomplete.
-	incomplete := []string{
+func TestScanKeyNeedMore(t *testing.T) {
+	// scanKey checks the FRONT token (the one ReadKey emits next), so only a
+	// buffer whose leading token is split asks for more bytes.
+	needMore := []string{
 		// escape sequences with no terminator yet
 		"\x1b",         // lone ESC — may be a sequence split on the ESC byte
 		"\x1b[",        // CSI with no params/final
@@ -73,30 +73,38 @@ func TestIncompleteToken(t *testing.T) {
 		"\xe2\x82",     // first two bytes of € (3-byte rune)
 		"\xf0\x9f\x98", // first three bytes of 😀 (4-byte rune)
 	}
-	for _, s := range incomplete {
-		if !incompleteToken([]byte(s)) {
-			t.Errorf("incompleteToken(%q) = false, want true", s)
+	for _, s := range needMore {
+		status, n := scanKey([]byte(s))
+		if status != keyNeedMore || n != len(s) {
+			t.Errorf("scanKey(%q) = (%v, %d), want (%v, %d)", s, status, n, keyNeedMore, len(s))
 		}
 	}
-	complete := []string{
-		"",              // empty
-		"l",             // plain key
-		"\x1b[A",        // finished arrow
-		"\x1b[<0;10;5M", // finished SGR mouse
-		"\x1bOP",        // finished SS3 (F1)
-		"\x1bx",         // ESC + ordinary byte (Alt-x); nextKey splits it
-		"é",             // complete 2-byte rune
-		"€",             // complete 3-byte rune
-		"😀",             // complete 4-byte rune
+}
+
+func TestScanKeyReady(t *testing.T) {
+	ready := []struct {
+		in string
+		n  int
+	}{
+		{"", 0},                                 // empty
+		{"l", 1},                                // plain key
+		{"\x1b[A", 3},                           // finished arrow
+		{"\x1b[<0;10;5M", len("\x1b[<0;10;5M")}, // finished SGR mouse
+		{"\x1bOP", 3},                           // finished SS3 (F1)
+		{"\x1bx", 1},                            // ESC + ordinary byte (Alt-x); nextKey splits it
+		{"é", len("é")},                         // complete 2-byte rune
+		{"€", len("€")},                         // complete 3-byte rune
+		{"😀", len("😀")},                         // complete 4-byte rune
 		// complete front token ahead of a split tail — emit the front first,
 		// the tail is refilled once it reaches the front
-		"abc\x1b[1;2", // 'a' is complete; trailing CSI handled later
-		"aaa\xc3",     // 'a' is complete; the split é (reviewer's case) handled later
-		"\xff",        // invalid lead byte — nextKey emits it as-is
+		{"abc\x1b[1;2", 1}, // 'a' is complete; trailing CSI handled later
+		{"aaa\xc3", 1},     // 'a' is complete; the split é (reviewer's case) handled later
+		{"\xff", 1},        // invalid lead byte — nextKey emits it as-is
 	}
-	for _, s := range complete {
-		if incompleteToken([]byte(s)) {
-			t.Errorf("incompleteToken(%q) = true, want false", s)
+	for _, c := range ready {
+		status, n := scanKey([]byte(c.in))
+		if status != keyReady || n != c.n {
+			t.Errorf("scanKey(%q) = (%v, %d), want (%v, %d)", c.in, status, n, keyReady, c.n)
 		}
 	}
 }
