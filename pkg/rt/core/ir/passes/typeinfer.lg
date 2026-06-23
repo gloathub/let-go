@@ -295,39 +295,49 @@
   "Return dependency maps for the sparse solver.
    Walks every reachable block once."
   [f]
-  (let [bu (atom {})
-        ps (atom {})
-        add (fn [m k v] (swap! m update k (fnil conj #{}) v))
-        add-branch-args
-        (fn [pred target args]
-          (loop [as args pos 0]
-            (when (seq as)
+  ;; bu (branch-arg-users) and ps (param-sources) are built with transient
+  ;; maps threaded through the walk — no atom + swap! + persistent assoc per
+  ;; edge. These maps carry one entry per value/param, so the old
+  ;; (swap! m update k (fnil conj #{}) v) dominated lowering allocation via
+  ;; Atom.Swap + PersistentMap.Assoc. Transient assoc! mutates in place;
+  ;; iteration order is irrelevant (sets are joined order-independently).
+  (let [add (fn [m k v] (assoc! m k (conj (get m k #{}) v)))
+        process-args
+        (fn [bu ps pred target args]
+          (loop [as args pos 0 bu bu ps ps]
+            (if (seq as)
               (let [arg-id (first as)
                     pp [target pos]]
-                (add bu arg-id pp)
-                (add ps pp [pred target arg-id]))
-              (recur (rest as) (inc pos)))))]
-    (doseq [bid (ir/blocks f)]
-      (let [term (ir/block-term bid f)]
-        (when-not (nil? term)
-          (let [op  (ir/op term f)
-                aux (ir/aux term f)]
-            (case op
-              :branch
-              (add-branch-args bid
-                (ir/branch-target-target aux)
-                (ir/branch-target-args aux))
-              :branch-if
-              (let [tt (ir/cond-target-true aux)
-                    ft (ir/cond-target-false aux)]
-                (add-branch-args bid
-                                 (ir/branch-target-target tt)
-                                 (ir/branch-target-args tt))
-                (add-branch-args bid
-                                 (ir/branch-target-target ft)
-                                 (ir/branch-target-args ft)))
-              nil)))))
-    {:uses (ir/uses f) :branch-arg-users @bu :param-sources @ps}))
+                (recur (rest as) (inc pos)
+                       (add bu arg-id pp)
+                       (add ps pp [pred target arg-id])))
+              [bu ps])))
+        [bu ps]
+        (reduce
+          (fn [[bu ps] bid]
+            (let [term (ir/block-term bid f)]
+              (if (nil? term)
+                [bu ps]
+                (let [op  (ir/op term f)
+                      aux (ir/aux term f)]
+                  (case op
+                    :branch
+                    (process-args bu ps bid
+                                  (ir/branch-target-target aux)
+                                  (ir/branch-target-args aux))
+                    :branch-if
+                    (let [tt (ir/cond-target-true aux)
+                          ft (ir/cond-target-false aux)
+                          [bu ps] (process-args bu ps bid
+                                                (ir/branch-target-target tt)
+                                                (ir/branch-target-args tt))]
+                      (process-args bu ps bid
+                                    (ir/branch-target-target ft)
+                                    (ir/branch-target-args ft)))
+                    [bu ps])))))
+          [(transient {}) (transient {})]
+          (ir/blocks f))]
+    {:uses (ir/uses f) :branch-arg-users (persistent! bu) :param-sources (persistent! ps)}))
 
 (defn- source-arg-type [source f state]
   (let [pred-bid  (nth source 0)
