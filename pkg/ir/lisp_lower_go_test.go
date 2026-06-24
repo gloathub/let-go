@@ -615,18 +615,294 @@ func TestLowerGoStrictMultiArityDefnLowersToNativeMultiArity(t *testing.T) {
 	}
 }
 
-func TestLowerGoBridgeFallsBackOnUnsupportedQuotedUUIDConst(t *testing.T) {
+func TestLowerGoBridgeLowersUUIDConst(t *testing.T) {
 	ensureLoader()
 
-	fn := buildLispIR(t, `(defn quoted-uuid [] (quote #uuid "123e4567-e89b-12d3-a456-426614174000"))`)
+	fn := buildLispIR(t, `(defn a-uuid [] #uuid "123e4567-e89b-12d3-a456-426614174000")`)
 	optimizeLispIR(t, fn)
 	result := lowerGo(t, fn, ":bridge")
 
-	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("fallback") {
-		t.Fatalf("expected :fallback status, got %v", got)
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status, got %v", got)
 	}
-	if result.ValueAt(vm.Keyword("decl")) != vm.NIL {
-		t.Fatalf("expected bridge fallback to omit :decl")
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, `vm.ParseUUID("123e4567-e89b-12d3-a456-426614174000")`) {
+		t.Fatalf("expected UUID const to lower through vm.ParseUUID with the bare canonical string\n--- go ---\n%s", rendered)
+	}
+}
+
+func TestLowerGoBridgeLowersBigDecimalConst(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn a-bigdec [] 123.456M)`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status, got %v", got)
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+	// str on a BigDecimal drops the M suffix, so the emitted parse string is the
+	// plain numeric form that vm.MustBigDecimalFromString round-trips.
+	if !strings.Contains(rendered, `vm.MustBigDecimalFromString("123.456")`) {
+		t.Fatalf("expected BigDecimal const to lower through vm.MustBigDecimalFromString\n--- go ---\n%s", rendered)
+	}
+}
+
+func TestLowerGoBridgeLowersRatioConst(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn a-ratio [] 1/2)`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status, got %v", got)
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, `vm.MustRatioFromString("1/2")`) {
+		t.Fatalf("expected Ratio const to lower through vm.MustRatioFromString\n--- go ---\n%s", rendered)
+	}
+}
+
+func TestLowerGoBridgeLowersBigIntConst(t *testing.T) {
+	ensureLoader()
+
+	// BigInt satisfies integer? but not int?, so it must NOT lower through the
+	// native int-lit path (gogen/int-lit can't render an arbitrary-precision
+	// *vm.BigInt — it produced an ExceptionInfo that leaked into the func body).
+	fn := buildLispIR(t, `(defn a-bigint [] 12345678901234567890N)`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status, got %v", got)
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, `vm.MustBigIntFromString("12345678901234567890")`) {
+		t.Fatalf("expected BigInt const to lower through vm.MustBigIntFromString\n--- go ---\n%s", rendered)
+	}
+}
+
+func TestLowerGoBridgeLowersZeroArgVariadicOp(t *testing.T) {
+	ensureLoader()
+
+	// (+) with zero args: build-builtin-op built an empty arg vector, then
+	// fold-binary-chain indexed (nth args 0) out of bounds during IR build.
+	// 0-arg must fall back to a normal call (runtime + returns 0).
+	fn := buildLispIR(t, `(defn z [] (+))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status, got %v", got)
+	}
+}
+
+func TestLowerGoBridgeLowersEmptyDo(t *testing.T) {
+	ensureLoader()
+
+	// (if true (do)) — the empty (do) is `when`-without-body's expansion. build-do
+	// returned nil (Clojure nil, not an InstId), so the if's true branch passed a
+	// nil block-arg; typeinfer's compute-uses then did (nth acc nil) → crash.
+	fn := buildLispIR(t, `(defn w [] (if true (do)))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status, got %v", got)
+	}
+}
+
+func TestLowerGoBridgeLowersEmptyLetBody(t *testing.T) {
+	ensureLoader()
+
+	// (if true (let [x 1])) — empty `let` body is the same class as empty (do):
+	// `when-first` without a body expands to (let* [x (first s)]). build-let used
+	// the same body loop and returned a bare nil, crashing typeinfer as above.
+	fn := buildLispIR(t, `(defn w [] (if true (let* [x 1])))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status, got %v", got)
+	}
+}
+
+func TestLowerGoBridgeLowersDefWithValue(t *testing.T) {
+	ensureLoader()
+
+	// (def x v) — interns x at runtime (rt.InternVar, NOT LookupVar which only
+	// resolves an existing var) and sets its root; result is the var.
+	fn := buildLispIR(t, `(defn d [] (def dvar 1))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status, got %v", got)
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, `rt.InternVar("`) || !strings.Contains(rendered, `"dvar")`) {
+		t.Fatalf("expected def to intern via rt.InternVar(ns, \"dvar\")\n--- go ---\n%s", rendered)
+	}
+	if !strings.Contains(rendered, ".SetRoot(vm.Int(1))") {
+		t.Fatalf("expected def value to set the var root\n--- go ---\n%s", rendered)
+	}
+}
+
+func TestLowerGoBridgeLowersDefNoValue(t *testing.T) {
+	ensureLoader()
+
+	// (def x) — forward declaration: intern the var, leave its root unaffected.
+	fn := buildLispIR(t, `(defn d [] (def dvar))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status, got %v", got)
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, `rt.InternVar("`) {
+		t.Fatalf("expected (def x) to intern via rt.InternVar\n--- go ---\n%s", rendered)
+	}
+	if strings.Contains(rendered, ".SetRoot(") {
+		t.Fatalf("expected no-value def to leave root unaffected (no SetRoot)\n--- go ---\n%s", rendered)
+	}
+}
+
+func TestLowerGoBridgeDefEmitsDynamicMeta(t *testing.T) {
+	ensureLoader()
+
+	// (def ^:dynamic x v) — the lowered Go must reproduce the bytecode
+	// defCompiler's var setup: intern, apply the meta map (which carries the
+	// :dynamic flag), then set the root. Without this the runtime-interned var
+	// silently loses its dynamic flag / metadata.
+	fn := buildLispIR(t, `(defn d [] (def ^:dynamic dynmetav 1))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, "rt.ApplyVarMeta(") {
+		t.Fatalf("expected rt.ApplyVarMeta for ^:dynamic def\n--- go ---\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `vm.Keyword("dynamic")`) {
+		t.Fatalf("expected emitted meta to carry :dynamic\n--- go ---\n%s", rendered)
+	}
+	if !strings.Contains(rendered, ".SetRoot(vm.Int(1))") {
+		t.Fatalf("expected def value to still set the var root\n--- go ---\n%s", rendered)
+	}
+}
+
+func TestLowerGoBridgeDefEmitsDocstringMeta(t *testing.T) {
+	ensureLoader()
+
+	// (def x "doc" v) — the docstring becomes :doc metadata (exactly as the
+	// bytecode defCompiler merges it), so the lowered Go must emit it.
+	fn := buildLispIR(t, `(defn d [] (def docmetav "the doc" 1))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, "rt.ApplyVarMeta(") ||
+		!strings.Contains(rendered, `vm.Keyword("doc")`) ||
+		!strings.Contains(rendered, `vm.String("the doc")`) {
+		t.Fatalf("expected docstring to lower into :doc meta\n--- go ---\n%s", rendered)
+	}
+	if !strings.Contains(rendered, ".SetRoot(vm.Int(1))") {
+		t.Fatalf("expected def value to still set the var root\n--- go ---\n%s", rendered)
+	}
+}
+
+func TestLowerGoBridgeDefNoMetaOmitsApplyVarMeta(t *testing.T) {
+	ensureLoader()
+
+	// A plain (def x v) carries no metadata, so no rt.ApplyVarMeta call should
+	// be emitted — only intern + SetRoot.
+	fn := buildLispIR(t, `(defn d [] (def plainmetav 1))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	rendered := bindAndRenderGoDecl(t, result)
+	if strings.Contains(rendered, "rt.ApplyVarMeta(") {
+		t.Fatalf("plain def must not emit rt.ApplyVarMeta\n--- go ---\n%s", rendered)
+	}
+}
+
+func TestBuildDefAppliesVarMetaAndDynamicFlag(t *testing.T) {
+	ensureLoader()
+
+	// build-def interns the var at build time (like the bytecode defCompiler's
+	// compile-time LookupOrAdd), so it must ALSO apply the metadata/flags then —
+	// otherwise the bytecode-lowered path drops ^:dynamic / type hints.
+	buildLispIR(t, `(defn d [] (def ^:dynamic ^{:tag (quote Integer)} dynflagprobe 1))`)
+
+	v := rt.NS(rt.NameCoreNS).Lookup(vm.Symbol("dynflagprobe"))
+	vr, ok := v.(*vm.Var)
+	if !ok {
+		t.Fatalf("dynflagprobe not interned as a Var, got %T", v)
+	}
+	if !vr.IsDynamic() {
+		t.Fatalf("expected build-def to mark ^:dynamic var dynamic")
+	}
+	meta := vr.Meta()
+	m, ok := meta.(interface {
+		ValueAt(vm.Value) vm.Value
+	})
+	if !ok {
+		t.Fatalf("expected var meta to be a map, got %T", meta)
+	}
+	if got := m.ValueAt(vm.Keyword("tag")); got == vm.NIL {
+		t.Fatalf("expected :tag type hint preserved in var meta, got %v", meta)
+	}
+}
+
+func TestBuildDefThreeArgRequiresStringDoc(t *testing.T) {
+	ensureLoader()
+
+	// (def x non-string v) is invalid: the 3-arg form's middle argument must be
+	// a docstring. build-def must reject it rather than silently treating the
+	// non-string as a discarded value (matching the bytecode defCompiler).
+	err := runLispExprErr(`(ir.build/build-fn (quote (defn d [] (def badx 1 2))))`)
+	if err == nil {
+		t.Fatalf("expected build error for 3-arg def with non-string docstring")
+	}
+}
+
+func TestLowerGoBridgeLowersEmptyFnBody(t *testing.T) {
+	ensureLoader()
+
+	// (defn f []) — empty body returns nil. build-body-result materialises a
+	// nil-const so the fn has a typed return; previously :return [] gave
+	// result-node nothing to type → "unsupported result type".
+	fn := buildLispIR(t, `(defn f [])`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status, got %v", got)
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, "return vm.NIL") {
+		t.Fatalf("expected empty-body fn to return vm.NIL\n--- go ---\n%s", rendered)
+	}
+}
+
+func TestLowerGoBridgeLowersRecordCtorShorthand(t *testing.T) {
+	ensureLoader()
+
+	// (Name. args...) record-constructor shorthand rewrites to (->Name args...),
+	// the positional ctor defrecord defines. Define the record so ->TCtor exists.
+	runLispExpr(t, `(defrecord TCtor [a b])`)
+	fn := buildLispIR(t, `(defn g [] (TCtor. 1 2))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status, got %v", got)
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+	if !strings.Contains(rendered, "->TCtor") {
+		t.Fatalf("expected (TCtor. ...) to lower as a call to ->TCtor\n--- go ---\n%s", rendered)
 	}
 }
 

@@ -246,7 +246,7 @@
 ;; --- form dispatch -------------------------------------------------------
 
 (declare build-list build-symbol build-if build-let build-do build-quote
-         build-var build-set! build-loop build-recur build-fn*
+         build-var build-set! build-def build-loop build-recur build-fn*
          build-vector build-map build-call build-try build-dot)
 
 ;; Sentinel returned by recur / any form whose current-block is already
@@ -284,11 +284,22 @@
               (char?    form)  (add-inst! ctx (ctx-block ctx) :const [] form)
               (keyword? form)  (add-inst! ctx (ctx-block ctx) :const [] form)
               (boolean? form)  (add-inst! ctx (ctx-block ctx) :const [] form)
+              ;; Non-integer numeric and tagged literals carry as plain consts:
+              ;; the reader has already materialized them into proper values
+              ;; (BigDecimal `M`, Ratio `a/b`, UUID `#uuid`), so build just needs
+              ;; a :const arm — there is no data-reader gap. (BigInt satisfies
+              ;; integer? above; Float satisfies float?.)
+              (decimal? form)  (add-inst! ctx (ctx-block ctx) :const [] form)
+              (ratio?   form)  (add-inst! ctx (ctx-block ctx) :const [] form)
+              (uuid?    form)  (add-inst! ctx (ctx-block ctx) :const [] form)
               (symbol?  form)  (build-symbol form ctx)
               (vector?  form)  (build-vector form ctx)
               (map?     form)  (build-map form ctx)
               (list?    form)  (build-list form ctx)
-              :else (throw (str "build-form: unrecognized form " form)))]
+              ;; pr-str (not str): a BigDecimal's str drops the `M` suffix, so an
+              ;; unrecognized 0.0M would mis-report as a float `0.0`. The readable
+              ;; form keeps the type legible in the failure bucket.
+              :else (throw (str "build-form: unrecognized form " (pr-str form))))]
     (when si
       (swap! ctx assoc :source-info old-si))
     nid))
@@ -475,6 +486,12 @@
         ;; Wrong-arity (inc) / (inc x y) — fall back to a generic call so
         ;; the runtime arity-error surfaces normally.
         (build-call form ctx))
+      ;; Zero args: the binary folds below all index args[0]/args[1], so an
+      ;; empty arg list (e.g. (+), (*), (-)) would nth out of bounds. Fall back
+      ;; to a generic call to the op's var — the runtime gives the right answer:
+      ;; (+) => 0, (*) => 1 identities; (-) (/) (< ) etc. => arity error.
+      (zero? (count args))
+      (build-call form ctx)
       ;; Unary: (- x) → (sub 0 x); (/ x) → (div 1 x) [reciprocal];
       ;; (+ x), (* x), comparisons → identity.
       (= 1 (count args))
@@ -532,6 +549,26 @@
         args   (rest (rest form))]
     (cons '. (cons recv (cons (list 'quote member) args)))))
 
+(defn- record-ctor-head?
+  "True for a record/type constructor shorthand head like TestDissocRecord. —
+   an UNQUALIFIED symbol whose name ENDS with '.' and has a type name before it.
+   Mirrors compiler.go's `(Name. args...)` rewrite guard (fnsym[-1]=='.' && len>1)."
+  [head]
+  (and (symbol? head)
+       (nil? (namespace head))
+       (let [hn (name head)
+             n  (count hn)]
+         (and (> n 1) (= "." (subs hn (dec n)))))))
+
+(defn- rewrite-record-ctor
+  "(Name. args...) -> (->Name args...), the positional constructor defrecord
+   defines. Mirrors compiler.go so the gogen path builds it as an ordinary call
+   to ->Name (a sibling var the loaded namespace already interned)."
+  [form]
+  (let [hn   (name (first form))
+        ctor (symbol (str "->" (subs hn 0 (dec (count hn)))))]
+    (cons ctor (rest form))))
+
 (defn build-list [form ctx]
   (let [head    (first form)
         builtin (get builtin-ops head)]
@@ -541,6 +578,7 @@
       (= head 'let*)  (build-let form ctx)
       (= head 'do)    (build-do form ctx)
       (= head 'quote) (build-quote form ctx)
+      (= head 'def)   (build-def form ctx)
       (= head 'var)   (build-var form ctx)
       (= head 'set!)  (build-set! form ctx)
       (= head 'loop)  (build-loop form ctx)
@@ -553,6 +591,9 @@
       ;; canonical dot form and build as a generic call to `.`.
       (and (method-call-head? head) (seq (rest form)))
       (build-call (rewrite-method-call form) ctx)
+      ;; Record/type constructor shorthand: (Name. arg...) → (->Name arg...).
+      (record-ctor-head? head)
+      (build-call (rewrite-record-ctor form) ctx)
       builtin         (build-builtin-op builtin form ctx)
       ;; Keywords, numbers, strings are callable (implement IFn in Clojure).
       ;; Treat them as Const values, build as generic call with const head.
@@ -602,6 +643,50 @@
     (let [var-nid (add-inst! ctx (ctx-block ctx) :const [] v)
           val-nid (build-form val ctx)]
       (add-inst! ctx (ctx-block ctx) :set-var [var-nid val-nid] nil))))
+
+(defn build-def [form ctx]
+  "(def sym), (def sym val), (def sym doc val). Interns sym in the current ns
+   at build time (LookupOrAdd — matching the bytecode defCompiler's compile-time
+   interning, so sibling/forward refs resolve), and emits a :def whose Refs[0]
+   is the var (as a Const) and optional Refs[1] is the value. Result is the var.
+   The 1-arg form leaves the root unaffected (forward declaration); the 2/3-arg
+   forms set the root.
+
+   Faithful to defCompiler's metadata handling: the name slot may be
+   (with-meta sym meta) — the meta map is preserved (it can carry type hints,
+   ^:dynamic / ^:private flags); the 3-arg form requires a String docstring as
+   its middle argument, merged into :doc. The meta is applied to the var NOW
+   (apply-def-meta!, since the var is interned at build time like defCompiler's
+   compile-time LookupOrAdd) AND carried as the :def's Aux so the gogen path,
+   which re-interns the var at runtime, can re-apply it."
+  (let [args (rest form)
+        n    (count args)]
+    (when (or (< n 1) (> n 3))
+      (throw (str "ir/build: def wrong number of forms (" n "), need 1-3")))
+    (let [doc      (when (= n 3)
+                     (let [d (nth args 1)]
+                       (when-not (string? d)
+                         (throw "ir/build: def 3-arg form requires a docstring (String) as second argument"))
+                       d))
+          raw-sym  (nth args 0)
+          ;; (def sym doc val): value is the 3rd arg; (def sym val): 2nd.
+          val-form (cond (= n 3) (nth args 2) (= n 2) (nth args 1) :else nil)
+          with-m?  (and (seq? raw-sym) (= (first raw-sym) 'with-meta))
+          sym      (if with-m? (second raw-sym) raw-sym)
+          meta0    (when with-m? (nth raw-sym 2))
+          meta     (if doc (assoc (or meta0 {}) :doc doc) meta0)
+          _        (when-not (symbol? sym)
+                     (throw (str "ir/build: def name must be a symbol, got " (pr-str sym))))
+          ;; resolve-or-intern: existing var, else intern a fresh one in *ns*.
+          var-obj  (or (resolve sym) (intern *ns* sym))
+          ;; Apply meta to the build-time var now (the bytecode-lowered path has
+          ;; no SET_META opcode — defCompiler likewise sets it at compile time).
+          _        (when (and meta (seq meta)) (apply-def-meta! var-obj meta))
+          var-nid  (add-inst! ctx (ctx-block ctx) :const [] var-obj)]
+      (if val-form
+        (let [val-nid (build-form val-form ctx)]
+          (add-inst! ctx (ctx-block ctx) :def [var-nid val-nid] meta))
+        (add-inst! ctx (ctx-block ctx) :def [var-nid] meta)))))
 
 (defn build-vector [form ctx]
   "[a b c] → (vector a b c). Empty vector → Const literal.
@@ -665,13 +750,21 @@
               :has-finally (some? finally-id)}]
     (add-inst! ctx (ctx-block ctx) :try refs aux)))
 
+(defn build-body-result [body ctx]
+  "Build body forms in order; return the last form's InstId. An empty body is
+   nil in Clojure — materialize a nil :const so the result is ALWAYS a real
+   InstId, never a bare nil. A bare nil used in value position (a do/let body
+   feeding an `if` branch's block-arg) leaked into branch :args and crashed
+   typeinfer's compute-uses on (nth uses nil). Used by build-do and build-let;
+   the fn-body builders guard nil separately (they emit :return [] when empty)."
+  (loop [fs body last-id nil]
+    (if (seq fs)
+      (recur (rest fs) (build-form (first fs) ctx))
+      (or last-id (add-inst! ctx (ctx-block ctx) :const [] nil)))))
+
 (defn build-do [form ctx]
-  "do evaluates each form sequentially; result is the last one."
-  (let [forms (rest form)]
-    (loop [fs forms last-id nil]
-      (if (seq fs)
-        (recur (rest fs) (build-form (first fs) ctx))
-        last-id))))
+  "do evaluates each form sequentially; result is the last one (nil if empty)."
+  (build-body-result (rest form) ctx))
 
 (defn build-let [form ctx]
   "let pushes a locals scope, evaluates bindings pairwise, then body."
@@ -684,10 +777,7 @@
               expr-id (build-form expr ctx)]
           (bind-local! ctx sym expr-id)
           (recur (+ i 2)))))
-    (let [result (loop [fs body last-id nil]
-                   (if (seq fs)
-                     (recur (rest fs) (build-form (first fs) ctx))
-                     last-id))
+    (let [result (build-body-result body ctx)
           ;; If the body switched to a join block (via nested if),
           ;; build-if rebound outer-scope vars to BlockArgs in the
           ;; current scope.  After we pop the let-scope those rebindings
@@ -1095,14 +1185,11 @@
         (bind-local! inner-ctx (nth capture-syms i)
                      (ir/add-inst inner entry :load-closed [] i))
         (recur (inc i))))
-    (let [last-val (loop [fs body-forms last-id nil]
-                     (if (seq fs)
-                       (recur (rest fs) (build-form (first fs) inner-ctx))
-                       last-id))
+    (let [last-val (build-body-result body-forms inner-ctx)
           final-blk (ctx-block inner-ctx)]
       (when-not (terminated? last-val)
         (add-terminator! inner-ctx final-blk :return
-          (if (nil? last-val) [] [last-val])
+          [last-val]
           nil)))
     {:kind :fn-template
      :fn inner
@@ -1223,14 +1310,11 @@
             (let [arg-id (ir/add-inst f entry-blk :load-arg [] i)]
               (bind-local! ctx (nth flat-args i) arg-id)
               (recur (inc i)))))
-        (let [last-val  (loop [fs flat-body last-id nil]
-                          (if (seq fs)
-                            (recur (rest fs) (build-form (first fs) ctx))
-                            last-id))
+        (let [last-val  (build-body-result flat-body ctx)
               final-blk (ctx-block ctx)]
           (when-not (terminated? last-val)
             (ir/add-terminator! f final-blk :return
-                                (if (nil? last-val) [] [last-val])
+                                [last-val]
                                 nil)))
         f)
       ;; Multi-arity path: preserve each arity as a nested template
