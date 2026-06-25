@@ -45,6 +45,9 @@ A subdir is earned when a cluster of related docs justifies one; one-off cross-c
 | Real-world Clojure compat findings | `xsofy-portability-gaps.md` |
 | Clojure-test-suite (jank) workflow | `clojure-test-suite.md` |
 | Testing strategy, conformance | `testing-and-conformance.md` |
+| Docs frontmatter convention + maintenance hook | `frontmatter-hook.md` |
+| Docs judgement-layer report (stale/supersession/index) | `docs-status.md` |
+| Regenerating generated artifacts after `.lg` edits | `regenerating-generated-artifacts.md` |
 | Perf ratchet, regression checkpoints, historical baselines | `perf/ratchet.md` |
 | Babashka pods (usage) | `guide/pods.md` |
 | Babashka pods (host protocol / design) | `design/pods.md` |
@@ -58,6 +61,7 @@ A subdir is earned when a cluster of related docs justifies one; one-off cross-c
 | IR fixup / link pass | `design/els2023-ir-fixup-audit.md` |
 | Parallel IR lowering + determinism | `design/parallel-lowering-and-type-cache.md` |
 | Runtime I/O, host decoupling | `design/runtime-io-host-decoupling.md` |
+| Off-goroutine execution context threading | `design/exec-context-threading.md` |
 
 ## Reading order if starting cold
 

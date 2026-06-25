@@ -208,6 +208,52 @@ jobs:
           echo "$changed"
           echo "$changed" | xargs python3 scripts/docs_frontmatter_hook.py --check
 
+  # Non-blocking judgement-layer report on docs PRs. Unlike docs-frontmatter
+  # (a per-file floor gate), this runs scripts/docs_status.py over the WHOLE
+  # docs/ tree — the supersession / authoritative-for / index checks are
+  # cross-doc and need the full corpus — and writes the result to the run's
+  # step summary plus a one-line annotation. It never fails the build:
+  # staleness and the judgement fields are reviewer signals, not gates.
+  # See docs/docs-status.md.
+  docs-status:
+    name: docs-status (report)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Report docs-status when this PR touches docs
+        run: |
+          git fetch --no-tags --depth=50 origin "${GITHUB_BASE_REF}"
+          changed=$(git diff --name-only --diff-filter=AM \
+            "origin/${GITHUB_BASE_REF}...HEAD" -- ':(glob)docs/**/*.md' || true)
+          if [ -z "$changed" ]; then
+            echo "No docs/**/*.md changed in this PR; skipping docs-status report."
+            exit 0
+          fi
+          report=$(python3 scripts/docs_status.py || true)
+          headline=$(printf '%s\n' "$report" | head -1)
+          {
+            echo '## docs-status report'
+            echo
+            echo 'Read-only judgement-layer scan over the whole `docs/` tree.'
+            echo 'Non-blocking — reviewer signals, not gate failures. See `docs/docs-status.md`.'
+            echo
+            echo '```'
+            echo "$report"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Surface the headline as an annotation + log line so the result is
+          # legible from the PR without opening the run summary: a notice when
+          # clean, a (non-blocking) warning when there's anything to look at.
+          echo "$headline"
+          if printf '%s' "$headline" | grep -q ' 0 findings'; then
+            echo "::notice title=docs-status::${headline} — clean"
+          else
+            echo "::warning title=docs-status::${headline} — see the run summary"
+          fi
+
   # Bootstrap-parity gate (deferred — runs as 'make parity-full' locally).
   # Until parity-full is wired as a CI job, `make check-generated` protects
   # the artifacts parity-full depends on.
