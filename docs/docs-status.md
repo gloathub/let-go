@@ -37,6 +37,10 @@ from the repo root (defaults to scanning `docs/`); override with
 - **aged-human-verified** — `human-verified:` is present but older than
   `--human-stale-days` (default 365). A human vouched once, but long
   enough ago that the attestation is worth refreshing.
+- **invalid date values** — `last-verified:` or `human-verified:` is
+  present but not a valid `YYYY-MM-DD`. A typo'd date is surfaced rather
+  than silently ignored — the floor check only verifies the key exists,
+  not that the value parses.
 - **supersession** — a `superseded-by:` / `supersedes:` link that
   dangles (target file not found, or an ambiguous basename), or that the
   other doc doesn't mirror, or a `status: superseded` doc with no

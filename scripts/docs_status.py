@@ -18,6 +18,8 @@ Findings, by category:
   stale-last-verified   last-verified older than --stale-days.
   aged-human-verified   human-verified present but older than
                         --human-stale-days (a human vouched, but long ago).
+  invalid-date          last-verified or human-verified present but not a
+                        valid YYYY-MM-DD (a typo'd date, not a missing one).
   supersession          superseded-by/supersedes that dangles (target not
                         found) or isn't mirrored on the other doc; status
                         that disagrees with the links.
@@ -166,6 +168,7 @@ def load_docs(root: Path) -> tuple[list[Doc], list[str]]:
 class Report:
     stale_last_verified: list[dict] = field(default_factory=list)
     aged_human_verified: list[dict] = field(default_factory=list)
+    invalid_date: list[dict] = field(default_factory=list)
     supersession: list[dict] = field(default_factory=list)
     authoritative_clash: list[dict] = field(default_factory=list)
     missing_index: list[dict] = field(default_factory=list)
@@ -179,6 +182,7 @@ class Report:
             for x in (
                 self.stale_last_verified,
                 self.aged_human_verified,
+                self.invalid_date,
                 self.supersession,
                 self.authoritative_clash,
                 self.missing_index,
@@ -197,24 +201,32 @@ def analyze(docs: list[Doc], root: Path, stale_days: int, human_stale_days: int)
     for d in docs:
         by_basename.setdefault(d.path.name, []).append(d)
 
-    # Freshness.
+    # Freshness. A present-but-unparseable date is a finding, not silently
+    # dropped (last-verified) or mis-bucketed as never-vouched (human-verified).
     for d in docs:
-        lv = parse_date(d.scalar("last-verified"))
-        if lv is not None:
-            age = (TODAY - lv).days
-            if age > stale_days:
-                rep.stale_last_verified.append(
-                    {"doc": d.rel, "last_verified": lv.isoformat(), "age_days": age}
-                )
-        hv = parse_date(d.scalar("human-verified"))
-        if hv is None:
+        lv_raw = d.scalar("last-verified")
+        lv = parse_date(lv_raw)
+        if lv is None and lv_raw and lv_raw.strip():
+            rep.invalid_date.append(
+                {"doc": d.rel, "field": "last-verified", "value": lv_raw.strip()}
+            )
+        elif lv is not None and (TODAY - lv).days > stale_days:
+            rep.stale_last_verified.append(
+                {"doc": d.rel, "last_verified": lv.isoformat(), "age_days": (TODAY - lv).days}
+            )
+
+        hv_raw = d.scalar("human-verified")
+        hv = parse_date(hv_raw)
+        if hv is None and hv_raw and hv_raw.strip():
+            rep.invalid_date.append(
+                {"doc": d.rel, "field": "human-verified", "value": hv_raw.strip()}
+            )
+        elif hv is None:
             rep.never_human_verified += 1
-        else:
-            age = (TODAY - hv).days
-            if age > human_stale_days:
-                rep.aged_human_verified.append(
-                    {"doc": d.rel, "human_verified": hv.isoformat(), "age_days": age}
-                )
+        elif (TODAY - hv).days > human_stale_days:
+            rep.aged_human_verified.append(
+                {"doc": d.rel, "human_verified": hv.isoformat(), "age_days": (TODAY - hv).days}
+            )
 
     # Supersession integrity. Resolve refs by basename within the tree.
     def resolve(ref: str, source: Doc) -> Doc | None:
@@ -286,10 +298,10 @@ def analyze(docs: list[Doc], root: Path, stale_days: int, human_stale_days: int)
 
 
 def render_text(rep: Report) -> str:
-    out: list[str] = [
-        f"docs-status: {rep.total_docs} docs scanned, {rep.finding_count()} findings",
-        "",
-    ]
+    summary = f"docs-status: {rep.total_docs} docs scanned, {rep.finding_count()} findings"
+    if rep.errors:
+        summary += f", {len(rep.errors)} errors"
+    out: list[str] = [summary, ""]
 
     def section(title: str, rows: list[str]) -> None:
         if not rows:
@@ -304,6 +316,10 @@ def render_text(rep: Report) -> str:
     section(
         "aged human-verified",
         [f"  {r['doc']} — {r['human_verified']} ({r['age_days']}d)" for r in rep.aged_human_verified],
+    )
+    section(
+        "invalid date values",
+        [f"  {r['doc']}: {r['field']} = {r['value']!r}" for r in rep.invalid_date],
     )
     section("supersession", [f"  {r['doc']}: {r['issue']}" for r in rep.supersession])
     section(

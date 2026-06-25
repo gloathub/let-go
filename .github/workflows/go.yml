@@ -232,7 +232,12 @@ jobs:
             echo "No docs/**/*.md changed in this PR; skipping docs-status report."
             exit 0
           fi
-          report=$(python3 scripts/docs_status.py || true)
+          # Capture the exit code without failing the step (the report is
+          # non-blocking). rc is non-zero when a doc is unreadable/malformed.
+          set +e
+          report=$(python3 scripts/docs_status.py)
+          rc=$?
+          set -e
           headline=$(printf '%s\n' "$report" | head -1)
           {
             echo '## docs-status report'
@@ -245,10 +250,11 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           # Surface the headline as an annotation + log line so the result is
-          # legible from the PR without opening the run summary: a notice when
-          # clean, a (non-blocking) warning when there's anything to look at.
+          # legible from the PR without opening the run summary. "Clean" requires
+          # both a clean exit (no read/parse errors) and zero findings — an
+          # errors-only run still prints "0 findings", so the headline alone lies.
           echo "$headline"
-          if printf '%s' "$headline" | grep -q ' 0 findings'; then
+          if [ "$rc" -eq 0 ] && printf '%s' "$headline" | grep -q ' 0 findings'; then
             echo "::notice title=docs-status::${headline} — clean"
           else
             echo "::warning title=docs-status::${headline} — see the run summary"
