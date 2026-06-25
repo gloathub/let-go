@@ -24,9 +24,11 @@ var (
 func init() {
 	flag.StringVar(&cpuProfile, "cpuprofile", "",
 		"write a Go CPU profile of script/REPL execution to this file "+
-			"(build modes -c/-b/-w and the bundled-binary path are not profiled)")
+			"(build modes -c/-b/-w and the bundled-binary path are not profiled; "+
+			"env LG_CPUPROFILE is the flag-free fallback)")
 	flag.StringVar(&memProfile, "memprofile", "",
-		"write a Go heap profile to this file after script/REPL execution")
+		"write a Go heap profile to this file after script/REPL execution "+
+			"(env LG_MEMPROFILE is the flag-free fallback)")
 }
 
 // startProfiling begins CPU profiling when -cpuprofile is set and arranges for
@@ -34,6 +36,16 @@ func init() {
 // the CPU profile. The explicit stop at the end of main handles normal returns;
 // rt.AtExit covers language-level os/exit and System/exit, which skip defers.
 func startProfiling() {
+	// Env fallback so profiling works for scripts that read raw os.Args and
+	// assume a fixed layout (e.g. scripts/ir-stress.lg does `(drop 2 os/args)`),
+	// where -cpuprofile / -memprofile flags would shift the positional args and
+	// break the script. Flags win when both a flag and its env var are set.
+	if cpuProfile == "" {
+		cpuProfile = os.Getenv("LG_CPUPROFILE")
+	}
+	if memProfile == "" {
+		memProfile = os.Getenv("LG_MEMPROFILE")
+	}
 	stop := func() {}
 	if cpuProfile != "" {
 		f, err := os.Create(cpuProfile)
