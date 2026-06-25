@@ -613,8 +613,11 @@ const prFastFilter = `^Benchmark(RatchetAnchor|FrameDispatch|FrameAlloc|FuncInvo
 
 var profiles = map[string]profile{
 	"pr-fast": {
-		count:     6,
-		benchtime: "1s",
+		// Sized for fast PR feedback, not absolute precision: ~53 cases ×
+		// count 3 × 500ms keeps a two-pass A/B well under the old full-fleet
+		// runtime, and the 12% budget sits above the residual sub-µs jitter.
+		count:     3,
+		benchtime: "500ms",
 		budget:    0.12,
 		jobs: func(tags string) ([]captureJob, error) {
 			re, err := regexp.Compile(prFastFilter)
