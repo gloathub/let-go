@@ -75,5 +75,25 @@ func installJSNS() {
 	})
 	ns.Def("emit", emitFn)
 
+	// (js/url-param name) -> string-or-nil. Reads a query parameter from the
+	// page URL that loaded the bundle; nil if absent or off-browser. Lets .lg
+	// boot code parameterize from the URL (?seed=42, ?bench=fast) without JS
+	// plumbing. The page URL reaches the worker via the host seam below
+	// (see hostURLParam).
+	urlParamFn, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 1 {
+			return vm.NIL, nil
+		}
+		name, ok := vs[0].(vm.String)
+		if !ok {
+			return vm.NIL, nil
+		}
+		if v, ok := hostURLParam(string(name)); ok {
+			return vm.String(v), nil
+		}
+		return vm.NIL, nil
+	})
+	ns.Def("url-param", urlParamFn)
+
 	RegisterNS(ns)
 }
