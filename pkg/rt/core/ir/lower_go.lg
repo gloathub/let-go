@@ -1499,68 +1499,85 @@
         coerced    (mapv (fn [rid spec] (coerce-arg-to-type f closed-exprs rid spec))
                          arg-rids
                          param-specs)
-        callee-ident (if (:native? entry)
+        ;; A :go-pkg means the callee lives in ANOTHER Go package — a native
+        ;; module (:native?) OR a cross-ns lowered sibling — so qualify the call
+        ;; `pkg.Fn` and import that package. Intra-ns lowered siblings (no
+        ;; :go-pkg) call bare. The ec arg is separate (keyed on :native? below).
+        callee-ident (if (:go-pkg entry)
                        (gogen/field-sel
                          (gogen/ident (pkg-alias-from (:go-pkg entry)))
                          (:go-name entry))
-                       (gogen/ident (:go-name entry)))]
-    (when (every? identity coerced)
-      ;; A direct call to another LOWERED let-go fn passes ec as its first arg;
-      ;; native Go-module fns (:native?) keep their context-free signature.
-      (let [call-args (if (:native? entry)
-                        coerced
-                        (into [(gogen/ident "ec")] coerced))
-            raw-call (gogen/call callee-ident call-args)]
-        (cond
-          ;; (vm.Value, error) — current shape. Keep the existing
-          ;; assign + err-check path.
-          (and (= result-spec "vm.Value") (:needs-error? entry))
-          (emit-call-stmts f target raw-call)
-          ;; Typed result + no error: result := <call>; target = vm.<Box>(result)
-          (and (not (:needs-error? entry))
-               (not= result-spec "vm.Value"))
-          (let [boxed (box-result-from-type raw-call result-spec)]
-            [(gogen/assign "=" target boxed)])
-          ;; Typed result + error: tr<nid>, te<nid> := <call>; if err return;
-          ;; target = vm.<Box>(tr<nid>). The intermediate result+err vars are
-          ;; declared in-place with `:=` under UNIQUE names keyed by the node's
-          ;; Indexed-RPN position nid (the typed result can't be assigned to the
-          ;; vm.Value target directly, and a fixed `result` name would collide
-          ;; across multiple typed-error calls in one fn). The RPN index is
-          ;; positional → stable, so the names stay deterministic across regens.
-          (and (:needs-error? entry)
-               (not= result-spec "vm.Value"))
-          (let [res-id (gogen/ident (str "tr" nid))
-                err-id (gogen/ident (str "te" nid))
-                assign (gogen/multi-assign ":=" [res-id err-id] [raw-call])
-                zero-expr (case (function-return-spec f)
-                            "bool"    (gogen/ident "false")
-                            "int"     (gogen/int-lit 0)
-                            "float64" (gogen/float-lit 0.0)
-                            "string"  (gogen/string-lit "")
-                            (gogen/ident "nil"))
-                err-check (gogen/if-stmt nil
-                                         (gogen/binary "!=" err-id (gogen/ident "nil"))
-                                         [(gogen/return-stmt [zero-expr err-id])]
-                                         nil)
-                boxed (box-result-from-type res-id result-spec)
-                box-assign (gogen/assign "=" target boxed)]
-            [assign err-check box-assign])
-          ;; vm.Value result, no error: target = <call>
-          (= result-spec "vm.Value")
-          [(gogen/assign "=" target raw-call)]
-          :else nil)))))
+                       (gogen/ident (:go-name entry)))
+        stmts
+        (when (every? identity coerced)
+          ;; A direct call to another LOWERED let-go fn (intra- OR cross-ns) passes
+          ;; ec as its first arg; native Go-module fns (:native?) are context-free.
+          (let [call-args (if (:native? entry)
+                            coerced
+                            (into [(gogen/ident "ec")] coerced))
+                raw-call (gogen/call callee-ident call-args)]
+            (cond
+              ;; (vm.Value, error) — current shape. Keep the existing
+              ;; assign + err-check path.
+              (and (= result-spec "vm.Value") (:needs-error? entry))
+              (emit-call-stmts f target raw-call)
+              ;; Typed result + no error: result := <call>; target = vm.<Box>(result)
+              (and (not (:needs-error? entry))
+                   (not= result-spec "vm.Value"))
+              (let [boxed (box-result-from-type raw-call result-spec)]
+                [(gogen/assign "=" target boxed)])
+              ;; Typed result + error: tr<nid>, te<nid> := <call>; if err return;
+              ;; target = vm.<Box>(tr<nid>). The intermediate result+err vars are
+              ;; declared in-place with `:=` under UNIQUE names keyed by the node's
+              ;; Indexed-RPN position nid (the typed result can't be assigned to the
+              ;; vm.Value target directly, and a fixed `result` name would collide
+              ;; across multiple typed-error calls in one fn). The RPN index is
+              ;; positional → stable, so the names stay deterministic across regens.
+              (and (:needs-error? entry)
+                   (not= result-spec "vm.Value"))
+              (let [res-id (gogen/ident (str "tr" nid))
+                    err-id (gogen/ident (str "te" nid))
+                    assign (gogen/multi-assign ":=" [res-id err-id] [raw-call])
+                    zero-expr (case (function-return-spec f)
+                                "bool"    (gogen/ident "false")
+                                "int"     (gogen/int-lit 0)
+                                "float64" (gogen/float-lit 0.0)
+                                "string"  (gogen/string-lit "")
+                                (gogen/ident "nil"))
+                    err-check (gogen/if-stmt nil
+                                             (gogen/binary "!=" err-id (gogen/ident "nil"))
+                                             [(gogen/return-stmt [zero-expr err-id])]
+                                             nil)
+                    boxed (box-result-from-type res-id result-spec)
+                    box-assign (gogen/assign "=" target boxed)]
+                [assign err-check box-assign])
+              ;; vm.Value result, no error: target = <call>
+              (= result-spec "vm.Value")
+              [(gogen/assign "=" target raw-call)]
+              :else nil)))]
+    (when stmts
+      ;; Record the callee's Go import only now that emission has actually
+      ;; produced statements. Doing it in lookup-direct-callable (before
+      ;; coercion) leaks an unused package import whenever an arg can't be
+      ;; coerced and the call falls back to cached-var dispatch — an unused
+      ;; import makes the emitted Go uncompilable.
+      (when (and (:go-pkg entry) *native-imports-used*)
+        (swap! *native-imports-used* conj (:go-pkg entry)))
+      stmts)))
 
 (defn- lookup-direct-callable
-  "Same-NS direct-call hit. Returns the registry entry when the callee
-   is a :load-var to a defn already registered in *lowered-registry*
-   that (a) lives in the SAME ns as the function being lowered, and
-   (b) has a vm.Value-only signature compatible with a bare Go call.
+  "Direct-call hit. Returns the registry entry when the callee is a :load-var
+   resolving (via resolve-call-entry) to a fn in *lowered-registry* — a same-ns
+   lowered sibling, a cross-ns lowered sibling (:go-pkg set, ec-passing), or a
+   native module fn (:native?, context-free) — whose param/result specs are all
+   coercion-supported. The callee's Go import is NOT recorded here: lookup
+   precedes coercion, and a typed param the caller can't satisfy makes
+   emit-typed-direct-call fall back to the trampoline, so recording the import
+   at lookup time would leak an unused import. emit-typed-direct-call records it
+   only once emission succeeds.
 
-   Returns nil if any condition fails; the caller falls back to the
-   trampoline (rt.LookupVar + rt.InvokeValue) when nil. Cross-ns is
-   intentionally deferred — adding it needs an import accumulator
-   threaded through lower-fn*, separate change."
+   Returns nil if any condition fails; the caller falls back to the trampoline
+   (cached-var IFn dispatch) when nil."
   [f callee-nid arg-count]
   (when (and (seq *lowered-registry*) (= :load-var (ir/op callee-nid f)))
     (let [sym     (symbol (ir/aux callee-nid f))
@@ -1578,8 +1595,6 @@
                  ;; complex types fall through to the trampoline.
                  (every? supported-coercion-type? (or (:param-specs entry) []))
                  (supported-coercion-type? (:result-spec entry)))
-        (when (and (:native? entry) (:go-pkg entry) *native-imports-used*)
-          (swap! *native-imports-used* conj (:go-pkg entry)))
         entry))))
 
 ;; Deftype constructor registry: map {constructor-name -> exported struct name},
