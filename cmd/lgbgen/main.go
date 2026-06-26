@@ -42,59 +42,90 @@ type embeddedNamespace struct {
 	src  string
 }
 
-// goLoweringNSOrder is intentionally explicit. The bytecode bundle can use
-// discovered dependency order, but Go lowering has pass-state dependencies that
-// are not fully represented by namespace :require clauses. In particular,
-// ir.build must lower after the type-inference passes have been loaded and
-// exercised, or arithmetic like (dec (count xs)) is emitted as vm.Value - 1.
-var goLoweringNSOrder = []string{
-	"core",
-	"walk",
-	"string",
-	"set",
-	"pprint",
-	"edn",
-	"io",
-	"async",
-	"hash",
-	"test",
-	"let-go.semver",
-	"ir.data.generated",
-	"ir.zipper",
-	"ir.passes",
-	"ir.dominance",
-	"ir.lattice",
-	"ir.ops",
-	"ir.structurize",
-	"ir.lower",
-	"ir.lower-go",
-	"ir.validate",
-	// purity must precede its dependents (dce/cse/licm :require it) and follow
-	// its own dep (mutability); otherwise a fresh bundle omits purity and
-	// purity/effect-free-inst? resolves to nil at runtime in dce/removable?.
-	"ir.passes.mutability",
-	"ir.passes.purity",
-	"ir.passes.dce",
-	"ir.passes.constfold",
-	"ir.passes.cse",
-	"ir.passes.typeinfer",
-	"ir.passes.licm",
-	"ir.passes.infer-arg-types",
-	"graph",
-	"ir.build",
-	"ir.passes.pipeline",
-	"ir.dump",
-	"ir.passes.trace",
+// goLoweringBuildAfterPasses is the one ordering constraint that namespace
+// :require clauses do not express: ir.build must be loaded after every
+// optimization/inference pass. The passes register type/pass state at load
+// time; if ir.build loads first that state isn't in effect and lowering emits
+// untyped arithmetic (e.g. (dec (count xs)) -> vm.Value - 1). ir.build itself
+// only :requires ir.data, so we inject the edge during derivation.
+const goLoweringBuildNS = "ir.build"
+
+// deriveGoLoweringOrder computes the Phase-1 compile order for the bundle by
+// topo-sorting the discoverable namespaces (every (ns ...) that is not
+// lgbgen:skip) by their :require edges, plus the one synthetic edge above.
+//
+// This replaces a hand-maintained list: a new pass namespace is now picked up
+// automatically via its :require edges, in correct dependency order, instead of
+// silently nil-ing at runtime when someone forgets to register it. The Go
+// emission pass (runGoTarget) already topo-sorts the same way; this brings the
+// bytecode/VM-state Phase 1 in line with it.
+// reaches reports whether `from` can reach `target` by following :require
+// edges (target included as a direct or transitive dependency). Used to skip
+// synthetic edges that would close a cycle.
+func reaches(from, target string, requires map[string][]string) bool {
+	seen := map[string]bool{}
+	var walk func(n string) bool
+	walk = func(n string) bool {
+		if n == target {
+			return true
+		}
+		if seen[n] {
+			return false
+		}
+		seen[n] = true
+		for _, d := range requires[n] {
+			if walk(d) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, d := range requires[from] {
+		if walk(d) {
+			return true
+		}
+	}
+	return false
 }
 
-func orderedEmbeddedNS(names []string) ([]embeddedNamespace, error) {
-	out := make([]embeddedNamespace, 0, len(names))
-	for _, name := range names {
-		src, ok := rt.EmbeddedSource(name)
-		if !ok {
-			return nil, fmt.Errorf("embedded namespace %q not found", name)
+func deriveGoLoweringOrder() ([]embeddedNamespace, error) {
+	names := rt.EmbeddedNSNames()
+	allowed := map[string]string{}
+	requires := map[string][]string{}
+	for _, n := range names {
+		src, ok := rt.EmbeddedSource(n)
+		if !ok || hasLgbgenSkipDirective(src) {
+			continue
 		}
-		out = append(out, embeddedNamespace{name: name, src: src})
+		allowed[n] = src
+		requires[n] = parseRequires(src)
+	}
+	// Synthetic edge: ir.build after the analysis/transform passes (see
+	// goLoweringBuildNS above). Only the passes that do NOT themselves depend on
+	// ir.build qualify — pipeline and other orchestrators :require ir.build and
+	// must stay after it; adding them here would create a cycle. Collect into a
+	// SORTED slice before appending: ir.build sorts before ir.passes.*, so
+	// topoSort reaches the passes THROUGH this dep list, and appending them in
+	// map-iteration (randomized) order would make the emitted order — and thus
+	// the bundle bytes — nondeterministic across runs.
+	if _, ok := allowed[goLoweringBuildNS]; ok {
+		var passEdges []string
+		for n := range allowed {
+			if strings.HasPrefix(n, "ir.passes.") &&
+				!reaches(n, goLoweringBuildNS, requires) {
+				passEdges = append(passEdges, n)
+			}
+		}
+		sort.Strings(passEdges)
+		requires[goLoweringBuildNS] = append(requires[goLoweringBuildNS], passEdges...)
+	}
+	sorted, err := topoSort(allowed, requires)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]embeddedNamespace, 0, len(sorted))
+	for _, n := range sorted {
+		out = append(out, embeddedNamespace{name: n, src: allowed[n]})
 	}
 	return out, nil
 }
@@ -419,14 +450,11 @@ func main() {
 	}
 
 	// Register an on-demand namespace loader so a namespace that depends at
-	// compile time on an lgbgen:skip namespace NOT present in
-	// goLoweringNSOrder can load that source on demand instead of failing to
-	// resolve. Note that some skip'd namespaces (e.g. graph, a compile-time
-	// dependency of the lowered ir.* pipeline via graph/toposort-by) ARE
-	// listed in goLoweringNSOrder and therefore are bundled — their skip
-	// directive only governs discovery-driven bundling, not the explicit
-	// go-lowering order. The loader covers the remaining skip'd namespaces
-	// that are referenced but not explicitly listed.
+	// compile time on an lgbgen:skip namespace NOT in the derived order can load
+	// that source on demand instead of failing to resolve. deriveGoLoweringOrder
+	// includes every discoverable (non-lgbgen:skip) namespace, so the loader
+	// only covers the genuinely full-skip namespaces (e.g. ir.data, which has a
+	// runtime re-intern block) that are referenced but not bundled.
 	{
 		coreNS := rt.NS(rt.NameCoreNS)
 		loaderCtx := compiler.NewCompiler(consts, coreNS)
@@ -434,9 +462,9 @@ func main() {
 	}
 
 	// Phase 1: compile all namespaces from source (bytecode, sets up VM state).
-	embeddedNS, err := orderedEmbeddedNS(goLoweringNSOrder)
+	embeddedNS, err := deriveGoLoweringOrder()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "go-lowering ns list failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "go-lowering ns derivation failed: %v\n", err)
 		os.Exit(1)
 	}
 	nsChunks := make(map[string]*vm.CodeChunk)
@@ -719,13 +747,7 @@ func runGoTarget(outDir string) {
 				fmt.Fprintf(os.Stderr, "%s: read error: %v\n", ns.name, err)
 				os.Exit(1)
 			}
-			// deftype/defprotocol declaration forms are forwarded raw (no
-			// single-arity gate) so lower-ns-to-go can capture them and emit
-			// native Go interface/struct/methods + bind the ctor/protocol
-			// registries that devirtualize their own namespace's calls.
-			if isDeclForm(form) {
-				defnForms = append(defnForms, form)
-			} else if isDefnOnly(form) && isSingleArityDefn(form) {
+			if isDefnOnly(form) && isSingleArityDefn(form) {
 				defnForms = append(defnForms, form)
 			}
 		}
@@ -841,26 +863,6 @@ func writeGogenWireup(pkgNames []string) {
 		}
 		fmt.Printf("  wrote %s (%d pkgs)\n", f.path, len(sorted))
 	}
-}
-
-// isDeclForm returns true if form is a (deftype ...) or (defprotocol ...)
-// declaration. lower-ns-to-go captures these raw (before macroexpansion turns
-// them into runtime make-deftype/extend-type* calls) and emits native Go type
-// declarations + receiver methods, rather than letting them bytecode-bridge.
-func isDeclForm(form vm.Value) bool {
-	list, ok := form.(vm.Sequable)
-	if !ok {
-		return false
-	}
-	seq := list.Seq()
-	if seq == nil {
-		return false
-	}
-	sym, ok := seq.First().(vm.Symbol)
-	if !ok {
-		return false
-	}
-	return string(sym) == "deftype" || string(sym) == "defprotocol"
 }
 
 // isDefnOnly returns true if form is a list beginning with defn or defn-

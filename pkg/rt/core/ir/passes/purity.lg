@@ -27,24 +27,37 @@
 ;; --- Op-level -----------------------------------------------------------
 
 (def pure-ops
-  "Op kinds whose Insts have no observable side effect, independent of
-   their operands or aux. Canonical set — CSE, DCE, and LICM all
-   reference this rather than maintaining their own copies.
+  "Op kinds whose Insts are value-pure: same value on each evaluation, no
+   I/O or mutable state. Canonical set — CSE and LICM reference this rather
+   than maintaining their own copies (two pure Insts with the same key are
+   interchangeable; a pure Inst can be hoisted).
 
-   :quot is value-pure (deterministic; no I/O or state) and so is CSE-,
-   LICM-, and DCE-eligible. Deliberate consequence: an UNUSED :quot may be
-   deleted by DCE even when its divisor is zero, dropping the divide-by-zero
-   trap. That is intentional — DCE only removes zero-use Insts, and an
-   unobserved computation's trap is not a guaranteed effect here. A :quot
-   whose value IS used still traps at runtime (verified: (let [x (quot 5 0)]
-   x) => 'divide by zero')."
+   Value-purity is NOT the same as effect-freedom: :quot is value-pure but
+   traps on a zero divisor, so it is in pure-ops (CSE/LICM eligible) yet in
+   trapping-ops too (NOT DCE-removable — see effect-free-inst?)."
   #{:const :load-arg :load-closed :block-arg
     :add :sub :mul :quot :lt :lte :gt :gte :eq :inc :dec})
 
+(def trapping-ops
+  "Value-pure ops that can still raise at runtime (e.g. :quot divide-by-zero).
+   They are CSE/LICM-eligible via pure-ops, but DCE must NOT delete an unused
+   one: removing it would drop a guaranteed trap. effect-free-inst? excludes
+   these so DCE keeps them; pure-inst? does not, so CSE/LICM still apply.
+   Verified: (let [x (quot 5 0)] :ok) => 'divide by zero', and an UNUSED
+   (quot 1 0) must keep trapping rather than be silently eliminated."
+  #{:quot})
+
 (defn pure-op?
-  "True when an op kind is unconditionally pure."
+  "True when an op kind is value-pure (CSE/LICM sense). May still trap; see
+   trapping-op? for the DCE-relevant distinction."
   [op]
   (contains? pure-ops op))
+
+(defn trapping-op?
+  "True when an op is value-pure but can raise, so DCE must not remove it
+   even with zero uses."
+  [op]
+  (contains? trapping-ops op))
 
 (def pure-terminator-ops
   "Terminator ops that are themselves side-effect-free (control flow /
@@ -337,11 +350,14 @@
    itself has no side effect) even when the Var is unstable, because
    nobody consumes the read.
 
-   The difference from pure-inst? is the :load-var branch: this is
-   true unconditionally; pure-inst? gates on stability."
+   The difference from pure-inst? is two branches: :load-var is true
+   unconditionally here (pure-inst? gates on stability), and trapping ops
+   (:quot) are NOT effect-free here (pure-inst? treats them as pure) — DCE
+   must keep an unused (quot _ 0) so its divide-by-zero trap survives."
   [f nid var-facts]
   (let [op (ir/op nid f)]
     (cond
+      (trapping-op? op) false
       (pure-op? op) true
       (= op :load-var) true
       (nil? var-facts) false

@@ -1,5 +1,9 @@
-;; lgbgen:skip — has runtime intern blocks that need live fn values; loaded from source on demand.
-;; Generic graph algorithms.
+;; Generic graph algorithms — pure toposort / Tarjan SCC utilities, called by
+;; the lowering passes themselves (graph/sccs in lower-go, graph/toposort-by in
+;; pipeline), so they must be bundled and visible at runtime. Bundled and
+;; lowered like any other namespace: the multi-arity defns (toposort, sccs)
+;; fall back to bytecode per-function (the Go target emits only single-arity
+;; defns), while the single-arity ones lower to Go.
 ;;
 ;; A graph is represented as a map {node -> coll-of-deps}. Nodes can
 ;; be any value usable as a map key. Missing keys are treated as
