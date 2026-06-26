@@ -31,6 +31,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+__LG_HOST_EVAL_IMPORTS__
 
 	"github.com/nooga/let-go/pkg/bytecode"
 	"github.com/nooga/let-go/pkg/compiler"
@@ -111,8 +112,38 @@ func main() {
 	if err != nil {
 		fmt.Fprint(os.Stderr, vm.FormatError(err))
 	}
+__LG_HOST_EVAL_BODY__
 }
 `
+
+// wasmHostEvalSnippet is spliced into wasmMainTmpl at __LG_HOST_EVAL_BODY__ when
+// -w-host-eval is set. It exposes window.Eval(code) — compile + run a string in
+// the loaded image, returning a stringified value (FormatError on failure) — and
+// then parks so the runtime stays live. The program's main chunk has already run
+// (typically just definitions); without parking the wasm would exit and Eval
+// would be unreachable. Structured data returns out-of-band via (js/emit ...).
+//
+// Main-thread only: a worker-mode (cross-origin-isolated) bundle would set Eval
+// on the worker's global scope, not window. -w-host-eval bundles are meant to be
+// served without COI; pair with -w-shell none (the client drives the runtime).
+const wasmHostEvalSnippet = `	eval := js.FuncOf(func(this js.Value, args []js.Value) any {
+		if len(args) < 1 {
+			return "error: Eval expects one string argument"
+		}
+		chunk, cerr := ctx.Compile(args[0].String())
+		if cerr != nil {
+			return vm.FormatError(cerr)
+		}
+		frame := vm.NewFrame(chunk, nil)
+		result, rerr := frame.RunProtected()
+		vm.ReleaseFrame(frame)
+		if rerr != nil {
+			return vm.FormatError(rerr)
+		}
+		return result.String()
+	})
+	js.Global().Set("Eval", eval)
+	select {}`
 
 // The HTML page and host JS live as embedded assets in pkg/rt/wasm.
 // See pkg/rt/wasm.AssembleHTML for the assembly contract.
@@ -142,7 +173,23 @@ addEventListener('fetch', e => {
 });
 `
 
-func buildWasm(ctx *compiler.Context, nsRes *resolver.NSResolver, src string, outDir string, shell bool, externalWasm bool, storeID string) error {
+// renderWasmMain fills wasmMainTmpl's placeholders: the storage-id, and the
+// -w-host-eval splice (the window.Eval bridge + park, plus its syscall/js
+// import). With hostEval false the marker lines are removed whole, so the
+// default bundle's generated main is byte-identical to the pre-flag output.
+func renderWasmMain(storeID string, hostEval bool) string {
+	s := strings.ReplaceAll(wasmMainTmpl, "__LG_STORAGE_ID__", strconv.Quote(storeID))
+	if hostEval {
+		s = strings.ReplaceAll(s, "__LG_HOST_EVAL_IMPORTS__", "\t\"syscall/js\"")
+		s = strings.ReplaceAll(s, "__LG_HOST_EVAL_BODY__", wasmHostEvalSnippet)
+	} else {
+		s = strings.ReplaceAll(s, "__LG_HOST_EVAL_IMPORTS__\n", "")
+		s = strings.ReplaceAll(s, "__LG_HOST_EVAL_BODY__\n", "")
+	}
+	return s
+}
+
+func buildWasm(ctx *compiler.Context, nsRes *resolver.NSResolver, src string, outDir string, shell bool, externalWasm bool, hostEval bool, storeID string) error {
 	// 1. Compile .lg → .lgb in memory
 	ctx.SetSource(src)
 	f, err := os.Open(src)
@@ -182,8 +229,7 @@ func buildWasm(ctx *compiler.Context, nsRes *resolver.NSResolver, src string, ou
 	if err := os.WriteFile(filepath.Join(tmpDir, "program.lgb"), lgbBuf.Bytes(), 0644); err != nil {
 		return err
 	}
-	mainSrc := strings.ReplaceAll(wasmMainTmpl, "__LG_STORAGE_ID__", strconv.Quote(storeID))
-	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(mainSrc), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(renderWasmMain(storeID, hostEval)), 0644); err != nil {
 		return err
 	}
 
@@ -260,9 +306,15 @@ func buildWasm(ctx *compiler.Context, nsRes *resolver.NSResolver, src string, ou
 		}
 	}
 
-	// 11. Write coi-serviceworker.js for cross-origin isolation on hosted servers
-	if err := os.WriteFile(filepath.Join(outDir, "coi-serviceworker.js"), []byte(coiServiceWorkerJS), 0644); err != nil {
-		return err
+	// 11. Write coi-serviceworker.js for cross-origin isolation on hosted servers.
+	// Skipped in host-eval mode: window.Eval is set on the page's global by the
+	// main-thread runtime, so the bundle must NOT become cross-origin isolated
+	// (that routes boot into a worker, where Eval would land off-window). Shipping
+	// the SW shim would let it upgrade the page to COI and silently break Eval.
+	if !hostEval {
+		if err := os.WriteFile(filepath.Join(outDir, "coi-serviceworker.js"), []byte(coiServiceWorkerJS), 0644); err != nil {
+			return err
+		}
 	}
 
 	fi, _ := os.Stat(outPath)
