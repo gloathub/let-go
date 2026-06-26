@@ -62,14 +62,18 @@ jobs:
       # default: they run each script under let-go and compare to the committed
       # test/gold/*.out goldens. Re-deriving those goldens from a LIVE Clojure is
       # done in the dedicated `gold-differential` job (no JVM dependency here).
+      # TEMPORARY (#299): per-package test timeout raised 60s→180s so the
+      # lowering-determinism harness (runs lgbgen twice, ~60-120s on CI) fits.
+      # Revert to 60s once that test is moved to a dedicated long-timeout step.
       - name: Test with bundled bytecode stdlib
-        run: go test -v -timeout 60s ./... -skip TestClojureTestSuite
+        run: go test -v -timeout 180s ./... -skip TestClojureTestSuite
 
       - name: Clojure compatibility test suite with bundled bytecode stdlib
         run: go test ./test/ -count=1 -run TestClojureTestSuite -v
 
+      # TEMPORARY (#299): see note on the bytecode step above.
       - name: Test with source stdlib bootstrap
-        run: go test -tags bootstrap -v -timeout 60s ./... -skip TestClojureTestSuite
+        run: go test -tags bootstrap -v -timeout 180s ./... -skip TestClojureTestSuite
 
       - name: Clojure compatibility test suite with source stdlib bootstrap
         run: go test -tags bootstrap ./test/ -count=1 -run TestClojureTestSuite -v

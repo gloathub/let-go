@@ -24,7 +24,9 @@ REPORT-SCRIPT := scripts/clojure_compat_report.sh
 # matches CI's per-package timeout so runaway tests die locally too.
 # Override on the command line: make test GOMEMLIMIT=4GiB.
 GOMEMLIMIT ?= 2GiB
-GO-TEST-TIMEOUT ?= 60s
+# TEMPORARY (#299): 60s→180s so the lowering-determinism harness (runs lgbgen
+# twice) fits. Revert once that test moves to a dedicated long-timeout step.
+GO-TEST-TIMEOUT ?= 180s
 
 # Export the heap cap to EVERY recipe's environment, not just `make test`.
 # The bootstrap/lowering targets (generate, lowered, parity) shell out to

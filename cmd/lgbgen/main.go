@@ -354,11 +354,19 @@ func main() {
 	var target string
 	var cpuProfilePath string
 	var memProfilePath string
+	// codeDir is the base directory for the generated //go:build gogen_ir wireup
+	// files (lg_gogen_ir.go, cmd/lgbgen/main_gogen_ir.go, pkg/ir/...). It defaults
+	// to "" = the repo root, the canonical generation target. Callers that lower
+	// into a throwaway directory (e.g. the determinism test) set it so lgbgen
+	// never rewrites the real checkout's wireup. When set, the manifest refresh
+	// is skipped too, keeping the run side-effect-free outside codeDir/outDir.
+	var codeDir string
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	fs.StringVar(&target, "target", "", "generation target: go, both, or empty for bundle-only")
 	fs.StringVar(&cpuProfilePath, "cpuprofile", "", "write Go CPU profile for the lgbgen process")
 	fs.StringVar(&memProfilePath, "memprofile", "", "write Go allocation profile (allocs) for the lgbgen process")
+	fs.StringVar(&codeDir, "code-dir", "", "base dir for generated gogen_ir wireup files (default: repo root)")
 	fs.Parse(os.Args[1:])
 
 	switch target {
@@ -494,13 +502,17 @@ func main() {
 	// runGoTarget re-pipelines the same loaded namespaces, so the order is
 	// immaterial and both artifacts come from one core compile.
 	if targetGo {
-		runGoTarget(goOutDir)
-		refreshManifest()
+		runGoTarget(goOutDir, codeDir)
+		// Skip the manifest refresh when lowering into a throwaway codeDir —
+		// the canonical generated.sums must only move under a real regen.
+		if codeDir == "" {
+			refreshManifest()
+		}
 		return
 	}
 	if targetBoth {
 		writeBundle(outPath, consts, nsChunks, nsOrder)
-		runGoTarget(goOutDir)
+		runGoTarget(goOutDir, codeDir)
 		return
 	}
 
@@ -680,8 +692,9 @@ func pruneEmptyDirs(root string) {
 }
 
 // runGoTarget re-pipelines each namespace's defn forms through the Go
-// lowering pipeline and writes .go source files to outDir.
-func runGoTarget(outDir string) {
+// lowering pipeline and writes .go source files to outDir. The gogen_ir
+// wireup files go under codeDir ("" = repo root, the canonical target).
+func runGoTarget(outDir, codeDir string) {
 	var failed []string
 	var generated []string // Go package names successfully written, for the wireup files.
 	pipelineVar := rt.LookupVar("ir.passes.pipeline", "lower-ns-to-go")
@@ -805,7 +818,7 @@ func runGoTarget(outDir string) {
 	// Emit the //go:build gogen_ir blank-import wireup files from exactly
 	// the set we just wrote — so namespaces that were skipped or failed to
 	// lower are never imported (which would break the tagged build).
-	writeGogenWireup(generated)
+	writeGogenWireup(generated, codeDir)
 	if len(failed) > 0 {
 		fmt.Fprintf(os.Stderr, "lgbgen: %d namespace(s) failed: %v\n", len(failed), failed)
 		os.Exit(1)
@@ -828,7 +841,7 @@ func runGoTarget(outDir string) {
 // All carry a "Code generated … DO NOT EDIT." banner and are kept in
 // lockstep with runGoTarget's output; the import set tracks the generated
 // tree exactly, including the exclusion of namespaces that failed to lower.
-func writeGogenWireup(pkgNames []string) {
+func writeGogenWireup(pkgNames []string, codeDir string) {
 	sorted := append([]string(nil), pkgNames...)
 	sort.Strings(sorted)
 
@@ -857,11 +870,21 @@ func writeGogenWireup(pkgNames []string) {
 		{filepath.Join("pkg", "ir", "zz_gogen_ir_wire_test.go"), "ir_test", "gogen_ir"},
 	}
 	for _, f := range files {
-		if err := os.WriteFile(f.path, []byte(render(f.pkg, f.buildTag)), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "write %s: %v\n", f.path, err)
+		// codeDir defaults to "" (repo root); a caller lowering into a throwaway
+		// tree sets it so the wireup never lands on the real checkout. Subdirs
+		// (cmd/lgbgen, pkg/ir) are created under codeDir as needed.
+		outPath := filepath.Join(codeDir, f.path)
+		if dir := filepath.Dir(outPath); dir != "." {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				fmt.Fprintf(os.Stderr, "mkdir %s: %v\n", dir, err)
+				os.Exit(1)
+			}
+		}
+		if err := os.WriteFile(outPath, []byte(render(f.pkg, f.buildTag)), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "write %s: %v\n", outPath, err)
 			os.Exit(1)
 		}
-		fmt.Printf("  wrote %s (%d pkgs)\n", f.path, len(sorted))
+		fmt.Printf("  wrote %s (%d pkgs)\n", outPath, len(sorted))
 	}
 }
 
