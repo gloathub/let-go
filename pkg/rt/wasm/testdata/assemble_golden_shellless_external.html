@@ -220,9 +220,12 @@ async function startWorkerMode() {
     };
     onmessage = async (e) => {
       if (e.data.t !== 'init') return;
-      const { sab, mode, wasmModule, wasmGzB64, wasmExecJS } = e.data;
+      const { sab, mode, wasmModule, wasmGzB64, wasmExecJS, urlSearch } = e.data;
       globalThis._lgKeyInt32 = new Int32Array(sab);
       globalThis._lgKeyUint8 = new Uint8Array(sab, 8, 16);
+      // Page URL search string, forwarded from the main thread (the worker's
+      // own location is the blob URL, not the page). Read by js/url-param.
+      globalThis._lgUrlSearch = urlSearch || '';
       // Load wasm_exec.js in worker scope
       eval(wasmExecJS);
       const go = new Go();
@@ -276,7 +279,7 @@ async function startWorkerMode() {
     }
   };
 
-  const initMsg = { t: 'init', sab, mode: WASM_MODE, wasmExecJS: WASM_EXEC_JS };
+  const initMsg = { t: 'init', sab, mode: WASM_MODE, wasmExecJS: WASM_EXEC_JS, urlSearch: location.search };
   if (WASM_MODE === 'external') {
     initMsg.wasmModule = await modPromise; // compiled on the main thread
   } else {
@@ -335,6 +338,9 @@ async function startMainThreadMode() {
     unlink(p,cb){cb(null);}, utimes(p,a,m,cb){cb(null);},
   };
   globalThis._lgFlush = function(){};
+  // Main-thread path runs on the page itself, so its location IS the page —
+  // expose the search string for js/url-param (matches the worker path).
+  globalThis._lgUrlSearch = location.search;
   // Main-thread side of the output bridge — the Go HostWriter calls
   // _lgOutput; feed it straight into LetGoHost (no worker round-trip).
   globalThis._lgOutput = function(s) {
