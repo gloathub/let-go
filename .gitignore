@@ -153,7 +153,11 @@ benchmark/letgo
 .lsp
 *.calva-repl
 CLAUDE.md
-.claude
+# Ignore local Claude state, but track .claude/skills/ — it holds symlinks into
+# the cross-client .agents/skills/ tree so Claude Code (which doesn't scan
+# .agents/ yet) auto-discovers committed skills. See .agents/skills/.
+.claude/*
+!.claude/skills/
 .DS_Store
 .nrepl-port
 
