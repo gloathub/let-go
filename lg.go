@@ -115,10 +115,10 @@ func runLGB(filename string) error {
 }
 
 // checkBundledLGB checks if the current executable has an appended payload.
-// Returns the LGB bytecode and (for a v2 bundle) the gzipped resource archive;
-// both are nil when no payload is found. The resource archive is nil for a
-// legacy bundle or one built without resources.
-func checkBundledLGB() (lgb []byte, res []byte) {
+// Returns the LGB bytecode, the gzipped resource archive (for a v2/v3 bundle),
+// and the baked storage store id (v3 only). The latter two are empty for a
+// legacy bundle or one built without them.
+func checkBundledLGB() (lgb []byte, res []byte, storeID string) {
 	candidates := make([]string, 0, 3)
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		candidates = append(candidates, exe)
@@ -134,11 +134,11 @@ func checkBundledLGB() (lgb []byte, res []byte) {
 			continue
 		}
 		seen[path] = true
-		if data, resData := bundle.ReadBundled(path); data != nil {
-			return data, resData
+		if data, resData, sid := bundle.ReadBundled(path); data != nil {
+			return data, resData, sid
 		}
 	}
-	return nil, nil
+	return nil, nil, ""
 }
 
 // bundleBinary creates a standalone executable by copying the lg binary
@@ -146,10 +146,12 @@ func checkBundledLGB() (lgb []byte, res []byte) {
 func bundleBinary(ctx *compiler.Context, nsRes *resolver.NSResolver, src string, dst string, basePath string) error {
 	ctx.SetSource(src)
 
-	// Snapshot the resource roots and output path *before* compiling — and
-	// absolutize them against the current cwd — because CompileMultiple runs
-	// the program's top-level forms, which may change the working directory.
-	// Relative roots resolved afterward would point at the wrong place.
+	// Snapshot the resource roots, output path, and storage store id *before*
+	// compiling — and absolutize the paths against the current cwd — because
+	// CompileMultiple runs the program's top-level forms, which may change the
+	// working directory. Relative roots resolved afterward would point at the
+	// wrong place, and the store id (which falls back to the cwd basename for
+	// main.lg/init.lg) would key off the changed directory.
 	resRoots := buildResourcePaths()
 	for i, r := range resRoots {
 		if abs, aerr := filepath.Abs(r); aerr == nil {
@@ -157,6 +159,7 @@ func bundleBinary(ctx *compiler.Context, nsRes *resolver.NSResolver, src string,
 		}
 	}
 	dstAbs, _ := filepath.Abs(dst)
+	bundleStoreID := storageIDForScript(src)
 
 	f, err := os.Open(src)
 	if err != nil {
@@ -232,8 +235,12 @@ func bundleBinary(ctx *compiler.Context, nsRes *resolver.NSResolver, src string,
 		return err
 	}
 
-	// Append the lgb payload + optional resource archive + trailer.
-	return bundle.AppendTrailer(out, lgbData, resArc)
+	// Append the lgb payload + optional resource archive + trailer. The store
+	// id (explicit -storage-id, else the source basename) was snapshotted
+	// before compilation so the bundle keys its storage by the app rather than
+	// by whatever the binary is renamed to at runtime, or by a directory the
+	// compiled forms chdir'd into. Mirrors the WASM build, which bakes the same id.
+	return bundle.AppendTrailer(out, lgbData, resArc, bundleStoreID)
 }
 
 func compileLG(ctx *compiler.Context, nsRes *resolver.NSResolver, src string, dst string) error {
@@ -435,7 +442,7 @@ func main() {
 
 	// Check for appended LGB payload before anything else.
 	// If found, we're a standalone binary — run it directly.
-	if lgbData, resData := checkBundledLGB(); lgbData != nil {
+	if lgbData, resData, bakedStoreID := checkBundledLGB(); lgbData != nil {
 		// Set up resolver so embedded namespaces (string, set, etc.) can load
 		ctx := initCompiler(false)
 		nsResolver := resolver.NewNSResolver(ctx, buildSearchPaths())
@@ -445,7 +452,13 @@ func main() {
 		// A bundle skips flag parsing, so every arg after the program name is a
 		// user arg. Set this before any chunk runs — top-level forms read it.
 		setCommandLineArgs(os.Args[1:])
-		installPersistentStorage(storageIDForScript(""))
+		// Prefer the store id baked into the bundle at build time. Fall back to
+		// the exe basename for bundles built before the v3 trailer carried one.
+		bundleStoreID := bakedStoreID
+		if bundleStoreID == "" {
+			bundleStoreID = storageIDForScript("")
+		}
+		installPersistentStorage(bundleStoreID)
 
 		// Resources are self-contained in a bundle: serve io/resource from the
 		// embedded archive only, ignoring the filesystem and -resource-paths.
