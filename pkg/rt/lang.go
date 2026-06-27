@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"sort"
 	"strconv"
@@ -1609,6 +1609,47 @@ func roundRatToInt(r *big.Rat, sign int, modeName string) (*big.Int, error) {
 }
 
 // nolint
+
+// rng backs the rand / rand-int / rand-nth / shuffle primitives and
+// math/random. math/rand/v2 has no global Seed by design — for a reproducible
+// (set-rand-seed! n) you hold your own source — so we keep one here. A
+// *rand.Rand is not safe for concurrent use, so rngMu guards every read and
+// the reseed, restoring the concurrency safety the top-level functions have.
+//
+// rngSeedSpread fills PCG's second state word so small/adjacent seeds
+// (0, 1, 2 …) don't produce near-identical streams.
+const rngSeedSpread = 0x9E3779B97F4A7C15
+
+var (
+	rngMu sync.Mutex
+	// Default: non-deterministic, full 128-bit entropy from the auto-seeded
+	// top-level v2 generator. (set-rand-seed! n) replaces it for repro runs.
+	rng = rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64()))
+)
+
+func rngFloat64() float64 {
+	rngMu.Lock()
+	defer rngMu.Unlock()
+	return rng.Float64()
+}
+
+func rngIntn(n int) int {
+	rngMu.Lock()
+	defer rngMu.Unlock()
+	return rng.IntN(n)
+}
+
+func rngShuffle(n int, swap func(i, j int)) {
+	rngMu.Lock()
+	defer rngMu.Unlock()
+	rng.Shuffle(n, swap)
+}
+
+func setRandSeed(seed int64) {
+	rngMu.Lock()
+	defer rngMu.Unlock()
+	rng = rand.New(rand.NewPCG(uint64(seed), rngSeedSpread))
+}
 
 func installLangNS() {
 	plus, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
@@ -4513,14 +4554,14 @@ func installLangNS() {
 	// or between 0 and n
 	randf, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) == 0 {
-			return vm.Float(rand.Float64()), nil
+			return vm.Float(rngFloat64()), nil
 		}
 		if len(vs) == 1 {
 			if n, ok := vs[0].(vm.Int); ok {
-				return vm.Float(rand.Float64() * float64(n)), nil
+				return vm.Float(rngFloat64() * float64(n)), nil
 			}
 			if n, ok := vs[0].(vm.Float); ok {
-				return vm.Float(rand.Float64() * float64(n)), nil
+				return vm.Float(rngFloat64() * float64(n)), nil
 			}
 			return vm.NIL, fmt.Errorf("rand expected number")
 		}
@@ -4539,7 +4580,7 @@ func installLangNS() {
 		if int(n) <= 0 {
 			return vm.MakeInt(0), nil
 		}
-		return vm.MakeInt(rand.Intn(int(n))), nil
+		return vm.MakeInt(rngIntn(int(n))), nil
 	})
 
 	// random-uuid: generate a random UUID v4
@@ -4572,7 +4613,7 @@ func installLangNS() {
 		if n == 0 {
 			return vm.NIL, fmt.Errorf("rand-nth called on empty collection")
 		}
-		idx := rand.Intn(n)
+		idx := rngIntn(n)
 		if l, ok := vs[0].(vm.Lookup); ok {
 			return l.ValueAt(vm.Int(idx)), nil
 		}
@@ -4609,10 +4650,27 @@ func installLangNS() {
 			s = s.Next()
 		}
 		// Fisher-Yates shuffle
-		rand.Shuffle(len(vals), func(i, j int) {
+		rngShuffle(len(vals), func(i, j int) {
 			vals[i], vals[j] = vals[j], vals[i]
 		})
 		return vm.NewArrayVector(vals), nil
+	})
+
+	// set-rand-seed!: seed the shared RNG so rand / rand-int / rand-nth /
+	// shuffle / math/random produce a reproducible sequence. Returns nil. The
+	// bang marks the process-wide mutation. For tests, benchmarks, and bug
+	// repros — NOT a gameplay-determinism mechanism (use explicit state for
+	// that). Reproducible only when rand calls happen in a deterministic order.
+	setRandSeedFn, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 1 {
+			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
+		}
+		n, ok := vs[0].(vm.Int)
+		if !ok {
+			return vm.NIL, fmt.Errorf("set-rand-seed! expected Int")
+		}
+		setRandSeed(int64(n))
+		return vm.NIL, nil
 	})
 
 	// transient: create a transient (mutable) version of a persistent collection
@@ -6428,6 +6486,7 @@ func installLangNS() {
 	ns.Def("rand-int", randInt)
 	ns.Def("rand-nth", randNth)
 	ns.Def("shuffle", shuffle)
+	ns.Def("set-rand-seed!", setRandSeedFn)
 	ns.Def("transient", transientf)
 	ns.Def("persistent!", persistentf)
 	ns.Def("conj!", conjBang)
