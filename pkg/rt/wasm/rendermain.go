@@ -106,18 +106,21 @@ __LG_HOST_EVAL_BODY__
 `
 
 // wasmHostEvalSnippet is spliced into wasmMainTmpl at __LG_HOST_EVAL_BODY__ when
-// -w-host-eval is set. It exposes window.Eval(code) — compile + run a string in
-// the loaded image, returning a stringified value (FormatError on failure) — and
-// then parks so the runtime stays live. The program's main chunk has already run
-// (typically just definitions); without parking the wasm would exit and Eval
-// would be unreachable. Structured data returns out-of-band via (js/emit ...).
+// -w-host-eval is set. After the program's main chunk runs, it installs an
+// internal _lgEval hook — compile + run a string in the loaded image, returning
+// a stringified value (FormatError on failure) — signals readiness, then parks
+// so the runtime stays callable.
 //
-// Main-thread only: a worker-mode (cross-origin-isolated) bundle would set Eval
-// on the worker's global scope, not window. -w-host-eval bundles are meant to be
-// served without COI; pair with -w-shell none (the client drives the runtime).
-const wasmHostEvalSnippet = `	eval := js.FuncOf(func(this js.Value, args []js.Value) any {
+// _lgEval is the internal hook (like _lgKey / _lgEmit); lg-host-core.js wraps it
+// as the public LetGoHost.eval(code), calling it directly on the main thread or
+// relaying through the worker in cross-origin-isolated mode, so one API works in
+// both boot modes. The host installs _lgRuntimeReady; calling it resolves the
+// LetGoHost.eval ready gate (main thread) or posts the ready message (worker),
+// closing the race where a client could call eval before the runtime is up.
+// Structured data returns out-of-band via (js/emit ...).
+const wasmHostEvalSnippet = `	hostEval := js.FuncOf(func(this js.Value, args []js.Value) any {
 		if len(args) < 1 {
-			return "error: Eval expects one string argument"
+			return "error: eval expects one string argument"
 		}
 		chunk, cerr := ctx.Compile(args[0].String())
 		if cerr != nil {
@@ -131,7 +134,10 @@ const wasmHostEvalSnippet = `	eval := js.FuncOf(func(this js.Value, args []js.Va
 		}
 		return result.String()
 	})
-	js.Global().Set("Eval", eval)
+	js.Global().Set("_lgEval", hostEval)
+	if ready := js.Global().Get("_lgRuntimeReady"); ready.Type() == js.TypeFunction {
+		ready.Invoke()
+	}
 	select {}`
 
 // RenderMain fills wasmMainTmpl's placeholders: the storage-id, and the

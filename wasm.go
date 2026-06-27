@@ -171,15 +171,9 @@ func buildWasm(ctx *compiler.Context, nsRes *resolver.NSResolver, src string, ou
 		}
 	}
 
-	// 11. Write coi-serviceworker.js for cross-origin isolation on hosted servers.
-	// Skipped in host-eval mode: window.Eval is set on the page's global by the
-	// main-thread runtime, so the bundle must NOT become cross-origin isolated
-	// (that routes boot into a worker, where Eval would land off-window). Shipping
-	// the SW shim would let it upgrade the page to COI and silently break Eval.
-	if !hostEval {
-		if err := os.WriteFile(filepath.Join(outDir, "coi-serviceworker.js"), []byte(coiServiceWorkerJS), 0644); err != nil {
-			return err
-		}
+	// 11. Write coi-serviceworker.js for cross-origin isolation on hosted servers
+	if err := os.WriteFile(filepath.Join(outDir, "coi-serviceworker.js"), []byte(coiServiceWorkerJS), 0644); err != nil {
+		return err
 	}
 
 	fi, _ := os.Stat(outPath)

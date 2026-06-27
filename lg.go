@@ -321,7 +321,7 @@ func init() {
 	flag.StringVar(&wasmOutput, "w", "", "build .lg file into a WASM web app (specify output directory)")
 	flag.StringVar(&wasmShell, "w-shell", "xterm", "shell for -w: 'xterm' (default) or 'none' (emit core only; client supplies its own shell via window.LetGoHost)")
 	flag.StringVar(&wasmPayload, "w-wasm", "inline", "wasm delivery for -w: 'inline' (default; gzip-base64 baked into index.html) or 'external' (emit a separate main.wasm the loader fetches + streams)")
-	flag.BoolVar(&wasmHostEval, "w-host-eval", false, "for -w: expose window.Eval(code) to call into the loaded image and keep it live (park after the program's main returns); pair with -w-shell none. Main-thread only — serve without cross-origin isolation")
+	flag.BoolVar(&wasmHostEval, "w-host-eval", false, "for -w: expose LetGoHost.eval(code) to call into the loaded image and keep it live (park after the program's main returns); works in both boot modes. Pair with -w-shell none")
 	flag.StringVar(&storageID, "storage-id", "", "logical storage store id for the storage namespace (default: script name, or current directory for main.lg)")
 	flag.StringVar(&sourcePaths, "source-paths", "",
 		"namespace search paths separated by the OS path-list separator "+

@@ -76,6 +76,9 @@ async function decompressWasm(b64) {
 //   onEmit(cb)        register sink for js/emit events; cb(name, parsedData)
 //   sendInput(str)    inject UTF-8 keystrokes/bytes toward the VM
 //   setSize(c, r)     advertise a new terminal size to the VM
+//   eval(code)        -w-host-eval bundles only: run code in the loaded image,
+//                     -> Promise<string> (stringified value or error). Direct
+//                     call on the main thread, worker round-trip when isolated.
 //
 // wake() is intentionally NOT in this slice. Unblocking a parked read-key
 // without sending real input requires a SAB-level protocol change (a
@@ -122,6 +125,24 @@ window.LetGoHost = (function() {
     _ready(mode) { readyMode = mode; if (readyCb) readyCb(mode); },
   };
 })();
+
+// --- LetGoHost.eval plumbing (live only in -w-host-eval bundles) ---
+// runtimeReady resolves once the wasm runtime has installed its _lgEval hook and
+// called _lgRuntimeReady (wired per boot mode below). LetGoHost.eval gates on it,
+// so a caller can't hit an undefined hook before the program's main has run.
+// evalImpl is installed by whichever boot mode runs: a direct _lgEval call on the
+// main thread, or a worker round-trip when cross-origin isolated.
+let runtimeReadyResolve;
+const runtimeReady = new Promise((r) => { runtimeReadyResolve = r; });
+let evalImpl = null;
+let evalSeq = 0;
+const evalPending = new Map();
+window.LetGoHost.eval = function(code) {
+  return runtimeReady.then(() => {
+    if (!evalImpl) throw new Error('LetGoHost.eval: bundle was not built with -w-host-eval');
+    return evalImpl(code);
+  });
+};
 
 // Boot status text. May be absent when a client ships its own HTML without
 // a #status element, so every use is guarded.
@@ -218,7 +239,20 @@ async function startWorkerMode() {
     globalThis._lgEmit = function(name, dataJson) {
       postMessage({t:'emit', name, data: dataJson});
     };
+    // Host-eval (worker): the runtime sets globalThis._lgEval, then calls this to
+    // announce readiness; relay to the main thread so it can resolve the gate.
+    globalThis._lgRuntimeReady = function() {
+      postMessage({t:'host-eval-ready'});
+    };
     onmessage = async (e) => {
+      if (e.data.t === 'eval') {
+        // Runs synchronously even while the program is parked on go.run: an
+        // async onmessage doesn't block the worker, and the _lgEval FuncOf
+        // returns its value on the calling stack.
+        const r = globalThis._lgEval ? globalThis._lgEval(e.data.code) : 'error: runtime not ready';
+        postMessage({t:'eval-result', id: e.data.id, result: r});
+        return;
+      }
       if (e.data.t !== 'init') return;
       const { sab, mode, wasmModule, wasmGzB64, wasmExecJS, urlSearch } = e.data;
       globalThis._lgKeyInt32 = new Int32Array(sab);
@@ -276,6 +310,21 @@ async function startWorkerMode() {
     if (e.data.t === 'emit') {
       try { window.LetGoHost._emit(e.data.name, JSON.parse(e.data.data)); }
       catch (err) { console.error('lg emit relay:', err); }
+    }
+    // Host-eval relay: the worker runs the eval and posts the string back,
+    // matched to its request id. evalImpl is installed here (not at startup) so
+    // it only exists once the worker's runtime is actually ready.
+    if (e.data.t === 'host-eval-ready') {
+      evalImpl = (code) => new Promise((resolve) => {
+        const id = ++evalSeq;
+        evalPending.set(id, resolve);
+        worker.postMessage({t:'eval', id, code});
+      });
+      runtimeReadyResolve();
+    }
+    if (e.data.t === 'eval-result') {
+      const resolve = evalPending.get(e.data.id);
+      if (resolve) { evalPending.delete(e.data.id); resolve(e.data.result); }
     }
   };
 
@@ -351,6 +400,12 @@ async function startMainThreadMode() {
   globalThis._lgEmit = function(name, dataJson) {
     try { window.LetGoHost._emit(name, JSON.parse(dataJson)); }
     catch (err) { console.error('lg emit:', err); }
+  };
+  // Host-eval (main thread): the runtime sets window._lgEval, then calls this to
+  // announce readiness. Eval runs in-page, so dispatch is a direct call.
+  globalThis._lgRuntimeReady = function() {
+    evalImpl = (code) => window._lgEval(code);
+    runtimeReadyResolve();
   };
 
   // Load wasm_exec.js

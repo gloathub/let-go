@@ -24,18 +24,18 @@ func TestRenderMainSubstitutesAllMarkers(t *testing.T) {
 // syscall/js unused would fail to compile, and the bundle should stay as it was.
 func TestRenderMainHostEvalOff(t *testing.T) {
 	got := RenderMain("s", false)
-	for _, leak := range []string{"syscall/js", `Set("Eval"`, "select {}"} {
+	for _, leak := range []string{"syscall/js", "_lgEval", "select {}"} {
 		if strings.Contains(got, leak) {
 			t.Fatalf("host-eval code leaked into default bundle: %q", leak)
 		}
 	}
 }
 
-// With -w-host-eval the generated main imports syscall/js, exposes window.Eval,
-// and parks so the runtime stays callable.
+// With -w-host-eval the generated main imports syscall/js, installs the _lgEval
+// hook, signals readiness, and parks so the runtime stays callable.
 func TestRenderMainHostEvalOn(t *testing.T) {
 	got := RenderMain("s", true)
-	for _, want := range []string{`"syscall/js"`, `js.Global().Set("Eval", eval)`, "select {}"} {
+	for _, want := range []string{`"syscall/js"`, `js.Global().Set("_lgEval", hostEval)`, "_lgRuntimeReady", "select {}"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("host-eval output missing %q", want)
 		}
