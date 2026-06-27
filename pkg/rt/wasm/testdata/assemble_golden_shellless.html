@@ -45,6 +45,7 @@ if (!crossOriginIsolated && window.isSecureContext && 'serviceWorker' in navigat
 const WASM_EXEC_JS = "// stub wasm_exec.js for the golden test\nconsole.log('exec stub');\n";
 const WASM_MODE = "inline";
 const WASM_GZ_B64 = "STUBWASMBLOBB64=="; // inline payload; "" in external mode
+const HOST_EVAL = false;  // built with -w-host-eval? gates LetGoHost.eval
 // External mode resolves the payload to an absolute URL so the Blob-URL worker
 // (whose relative base is the blob, not the page) can fetch it. A client can
 // override this to point at its own CDN.
@@ -126,23 +127,25 @@ window.LetGoHost = (function() {
   };
 })();
 
-// --- LetGoHost.eval plumbing (live only in -w-host-eval bundles) ---
+// --- LetGoHost.eval plumbing (-w-host-eval bundles only) ---
 // runtimeReady resolves once the wasm runtime has installed its _lgEval hook and
-// called _lgRuntimeReady (wired per boot mode below). LetGoHost.eval gates on it,
-// so a caller can't hit an undefined hook before the program's main has run.
-// evalImpl is installed by whichever boot mode runs: a direct _lgEval call on the
-// main thread, or a worker round-trip when cross-origin isolated.
+// called _lgRuntimeReady (wired per boot mode below). evalImpl is installed by
+// whichever boot mode runs: a direct _lgEval call on the main thread, or a worker
+// round-trip when cross-origin isolated. The vars stay declared in every bundle
+// (the boot relays below reference them), but eval is exposed only when the bundle
+// was built with -w-host-eval: a default bundle never calls _lgRuntimeReady, so an
+// installed eval would await a ready signal that never comes (hang) and would lie
+// to feature detection. Omitting it keeps `typeof LetGoHost.eval` honest.
 let runtimeReadyResolve;
 const runtimeReady = new Promise((r) => { runtimeReadyResolve = r; });
 let evalImpl = null;
 let evalSeq = 0;
 const evalPending = new Map();
-window.LetGoHost.eval = function(code) {
-  return runtimeReady.then(() => {
-    if (!evalImpl) throw new Error('LetGoHost.eval: bundle was not built with -w-host-eval');
-    return evalImpl(code);
-  });
-};
+if (HOST_EVAL) {
+  window.LetGoHost.eval = function(code) {
+    return runtimeReady.then(() => evalImpl(code));
+  };
+}
 
 // Boot status text. May be absent when a client ships its own HTML without
 // a #status element, so every use is guarded.

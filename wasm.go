@@ -152,7 +152,7 @@ func buildWasm(ctx *compiler.Context, nsRes *resolver.NSResolver, src string, ou
 	// 9. Build the HTML. shell=false emits the core glue only (no xterm shell
 	// / CDN tags). externalWasm=true emits the streaming loader and an empty
 	// inline payload (the wasm ships as main.wasm, written below).
-	html := wasmassets.AssembleHTML(string(wasmExecJS), wasmB64, shell, externalWasm)
+	html := wasmassets.AssembleHTML(string(wasmExecJS), wasmB64, shell, externalWasm, hostEval)
 
 	// 10. Write output
 	if err := os.MkdirAll(outDir, 0755); err != nil {
