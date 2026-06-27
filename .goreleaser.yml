@@ -6,7 +6,11 @@ before:
   hooks:
     - go mod tidy
     - go generate ./pkg/rt/
-    - go test -timeout 60s ./...
+    # -short skips the expensive lowering harnesses (determinism, AOT diff,
+    # deftype skeleton); those are gated in CI on every push to main, so this
+    # pre-build sanity run doesn't re-pay their ~minutes-long cost or risk the
+    # 60s timeout the determinism harness would otherwise blow.
+    - go test -short -timeout 60s ./...
 
 builds:
   - id: unix

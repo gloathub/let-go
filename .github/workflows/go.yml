@@ -62,21 +62,29 @@ jobs:
       # default: they run each script under let-go and compare to the committed
       # test/gold/*.out goldens. Re-deriving those goldens from a LIVE Clojure is
       # done in the dedicated `gold-differential` job (no JVM dependency here).
-      # TEMPORARY (#299): per-package test timeout raised 60s→180s so the
-      # lowering-determinism harness (runs lgbgen twice, ~60-120s on CI) fits.
-      # Revert to 60s once that test is moved to a dedicated long-timeout step.
+      # -short skips the expensive lowering harnesses (determinism, AOT diff,
+      # deftype skeleton); they run in the dedicated step below so this lane
+      # stays inside a 60s per-package timeout.
       - name: Test with bundled bytecode stdlib
-        run: go test -v -timeout 180s ./... -skip TestClojureTestSuite
+        run: go test -short -v -timeout 60s ./... -skip TestClojureTestSuite
 
       - name: Clojure compatibility test suite with bundled bytecode stdlib
         run: go test ./test/ -count=1 -run TestClojureTestSuite -v
 
-      # TEMPORARY (#299): see note on the bytecode step above.
       - name: Test with source stdlib bootstrap
-        run: go test -tags bootstrap -v -timeout 180s ./... -skip TestClojureTestSuite
+        run: go test -tags bootstrap -short -v -timeout 60s ./... -skip TestClojureTestSuite
 
       - name: Clojure compatibility test suite with source stdlib bootstrap
         run: go test -tags bootstrap ./test/ -count=1 -run TestClojureTestSuite -v
+
+      # The expensive lowering e2e harnesses self-skip under -short, so the fast
+      # lanes above exclude them. They build their own tagged binaries via
+      # subprocess (so a single untagged run covers both stdlib modes). The
+      # determinism harness compiles the whole stdlib twice concurrently and is
+      # the slow one: ~60-120s on CI, ~200s on a contended local machine. It runs
+      # here under a generous ceiling instead of inflating every package's budget.
+      - name: Expensive lowering e2e (determinism, AOT diff, deftype skeleton)
+        run: go test -v -timeout 600s ./test/e2e/ -run 'TestLoweringDeterminism|TestGogenAOTDiff|TestDeftypeSkeletonNativeLowering'
 
   # Differential gold check against a LIVE Clojure. The everyday `build` job is
   # clojure-free (it compares let-go to the committed test/gold/*.out goldens);

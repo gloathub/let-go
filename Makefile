@@ -20,13 +20,15 @@ GOLANGCI-LINT := github.com/golangci/golangci-lint/cmd/golangci-lint
 REPORT-SCRIPT := scripts/clojure_compat_report.sh
 
 # Resource caps for test invocations. GOMEMLIMIT bounds the Go heap
-# (soft cap — runtime aggressively GCs to stay under). GO-TEST-TIMEOUT
-# matches CI's per-package timeout so runaway tests die locally too.
+# (soft cap — runtime aggressively GCs to stay under).
 # Override on the command line: make test GOMEMLIMIT=4GiB.
 GOMEMLIMIT ?= 2GiB
-# TEMPORARY (#299): 60s→180s so the lowering-determinism harness (runs lgbgen
-# twice) fits. Revert once that test moves to a dedicated long-timeout step.
-GO-TEST-TIMEOUT ?= 180s
+# `make test` runs the full suite, including the expensive lowering harnesses.
+# The determinism test compiles the whole stdlib twice concurrently (~60-120s
+# on CI, ~200s on a contended local machine). CI's fast lanes use -short at 60s
+# and run these in a dedicated long-timeout step; the full local run keeps a
+# generous per-package ceiling matching that step.
+GO-TEST-TIMEOUT ?= 600s
 
 # Export the heap cap to EVERY recipe's environment, not just `make test`.
 # The bootstrap/lowering targets (generate, lowered, parity) shell out to
