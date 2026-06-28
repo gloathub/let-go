@@ -141,6 +141,14 @@ const runtimeReady = new Promise((r) => { runtimeReadyResolve = r; });
 let evalImpl = null;
 let evalSeq = 0;
 const evalPending = new Map();
+// Worker-path safety net: a worker crash or dropped message means the
+// 'eval-result' reply never arrives, so without this the pending entry leaks
+// and the caller's Promise hangs forever. The timer rejects + removes the entry
+// so the leak is bounded and the caller sees a failure. A late reply arriving
+// after the timeout is harmless — its id is already gone from evalPending and
+// the result is dropped. Generous by design: the worker runs eval synchronously,
+// so this guards lost responses, not slow-but-valid evaluation.
+const EVAL_TIMEOUT_MS = 30000;
 if (HOST_EVAL) {
   window.LetGoHost.eval = function(code) {
     return runtimeReady.then(() => evalImpl(code));
@@ -318,16 +326,25 @@ async function startWorkerMode() {
     // matched to its request id. evalImpl is installed here (not at startup) so
     // it only exists once the worker's runtime is actually ready.
     if (e.data.t === 'host-eval-ready') {
-      evalImpl = (code) => new Promise((resolve) => {
+      evalImpl = (code) => new Promise((resolve, reject) => {
         const id = ++evalSeq;
-        evalPending.set(id, resolve);
+        const timer = setTimeout(() => {
+          if (evalPending.delete(id)) {
+            reject(new Error('LetGoHost.eval: no worker response within ' + EVAL_TIMEOUT_MS + 'ms'));
+          }
+        }, EVAL_TIMEOUT_MS);
+        evalPending.set(id, { resolve, timer });
         worker.postMessage({t:'eval', id, code});
       });
       runtimeReadyResolve();
     }
     if (e.data.t === 'eval-result') {
-      const resolve = evalPending.get(e.data.id);
-      if (resolve) { evalPending.delete(e.data.id); resolve(e.data.result); }
+      const pending = evalPending.get(e.data.id);
+      if (pending) {
+        clearTimeout(pending.timer);
+        evalPending.delete(e.data.id);
+        pending.resolve(e.data.result);
+      }
     }
   };
 
