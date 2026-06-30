@@ -13,8 +13,10 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	runtimeDebug "runtime/debug"
 	"strings"
 
+	"github.com/nooga/let-go/pkg/buildmeta"
 	"github.com/nooga/let-go/pkg/bundle"
 	"github.com/nooga/let-go/pkg/bytecode"
 	"github.com/nooga/let-go/pkg/compiler"
@@ -31,6 +33,14 @@ func versionString() string {
 		return fmt.Sprintf("%s (%s)", version, commit[:7])
 	}
 	return version
+}
+
+func applyBuildInfoMetadata() {
+	info, ok := runtimeDebug.ReadBuildInfo()
+	if !ok {
+		return
+	}
+	version, commit = buildmeta.Resolve(version, commit, info)
 }
 
 func motd() {
@@ -444,6 +454,8 @@ func emitRuntimeStats() {
 }
 
 func runMain() int {
+	applyBuildInfoMetadata()
+
 	// Propagate version metadata to runtime so System/getProperty exposes it.
 	rt.Version = version
 	rt.Commit = commit
