@@ -321,6 +321,7 @@ func installIOBuiltins(ns *vm.Namespace) {
 	})
 
 	// *in*, *out*, *err* — stdin, stdout, stderr as IOHandle
+	// (stdinHandle is created above for read-line's no-arg form)
 	stdoutHandle := vm.NewBoxed(NewIOHandle(os.Stdout))
 	stderrHandle := vm.NewBoxed(NewIOHandle(os.Stderr))
 
