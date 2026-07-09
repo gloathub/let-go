@@ -16,8 +16,9 @@ import (
 )
 
 // evalIntegrant compiles and evaluates one expression against the core NS,
-// mirroring evalMedley — used to check that find-var / get-method resolve.
-// Runtime behavior is covered by test/integrant_compat_test.lg.
+// mirroring evalMedley — used to check that the symbols integrant references on
+// its :clj branch resolve. Runtime behavior of find-var / get-method is covered
+// by test/integrant_compat_test.lg.
 func evalIntegrant(expr string) (vm.Value, error) {
 	ctx := compiler.NewCompiler(vm.NewConsts(), rt.NS(rt.NameCoreNS))
 	_, out, err := ctx.CompileMultiple(strings.NewReader(expr))
@@ -39,6 +40,28 @@ func TestFindVarGetMethodCompat(t *testing.T) {
 
 	t.Run("get-method resolves", func(t *testing.T) {
 		_, err := evalIntegrant(`(defn f [m v] (get-method m v))`)
+		assert.NoError(t, err)
+	})
+}
+
+// TestClasspathScanStubs exercises the compile-only stubs for JVM-only
+// classpath scanning that weavejester/integrant reaches on its :clj branch
+// (resources/load-hierarchy/load-annotations). They must resolve so the
+// namespace loads; they are never usefully callable under let-go.
+func TestClasspathScanStubs(t *testing.T) {
+	t.Run("enumeration-seq resolves", func(t *testing.T) {
+		_, err := evalIntegrant(`(defn f [e] (enumeration-seq e))`)
+		assert.NoError(t, err)
+	})
+
+	t.Run("clojure.lang.RT/baseLoader resolves", func(t *testing.T) {
+		_, err := evalIntegrant(`(defn f [] (clojure.lang.RT/baseLoader))`)
+		assert.NoError(t, err)
+	})
+
+	// The exact shape integrant's `resources` uses on its :clj branch.
+	t.Run("integrant resources shape compiles", func(t *testing.T) {
+		_, err := evalIntegrant(`(defn f [path] (enumeration-seq (.getResources (clojure.lang.RT/baseLoader) path)))`)
 		assert.NoError(t, err)
 	})
 }
